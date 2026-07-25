@@ -132,17 +132,41 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
 	return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
-function hasNumberFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
-	return fields.every((field) => typeof value[field] === "number");
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+	return Object.keys(value).every((key) => keys.includes(key));
+}
+
+function hasFiniteNumberFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
+	return fields.every((field) => typeof value[field] === "number" && Number.isFinite(value[field]));
+}
+
+function hasAbsentOrFiniteNumber(value: Record<string, unknown>, field: string): boolean {
+	return !(field in value) || (typeof value[field] === "number" && Number.isFinite(value[field]));
 }
 
 function isUsage(value: unknown): value is Usage {
-	if (!isRecord(value) || !hasNumberFields(value, ["input", "output", "cacheRead", "cacheWrite", "totalTokens"])) {
+	if (
+		!isRecord(value) ||
+		!hasOnlyKeys(value, [
+			"input",
+			"output",
+			"cacheRead",
+			"cacheWrite",
+			"cacheWrite1h",
+			"reasoning",
+			"totalTokens",
+			"cost",
+		]) ||
+		!hasFiniteNumberFields(value, ["input", "output", "cacheRead", "cacheWrite", "totalTokens"]) ||
+		!hasAbsentOrFiniteNumber(value, "cacheWrite1h") ||
+		!hasAbsentOrFiniteNumber(value, "reasoning") ||
+		!isRecord(value.cost)
+	) {
 		return false;
 	}
 	return (
-		isRecord(value.cost) &&
-		hasNumberFields(value.cost, ["input", "output", "cacheRead", "cacheWrite", "total"])
+		hasExactKeys(value.cost, ["input", "output", "cacheRead", "cacheWrite", "total"]) &&
+		hasFiniteNumberFields(value.cost, ["input", "output", "cacheRead", "cacheWrite", "total"])
 	);
 }
 
@@ -448,6 +472,26 @@ describe("extension registration", () => {
 					summary: "Malformed details",
 					details: { ...canonicalCheckpoint, authorization: { mayStartTurn: true } },
 					usage,
+				},
+			}),
+		).toThrow("expected complete projection result");
+	});
+
+	it.each([
+		["non-finite optional cacheWrite1h", { ...usage, cacheWrite1h: Number.POSITIVE_INFINITY }],
+		["non-numeric optional reasoning", { ...usage, reasoning: "1" }],
+		["extraneous top-level Usage key", { ...usage, extra: 1 }],
+		["extraneous Usage cost key", { ...usage, cost: { ...usage.cost, extra: 1 } }],
+	])("rejects %s at the test boundary", (_description, malformedUsage) => {
+		expect(() =>
+			projectionResult({
+				projection: {
+					type: "portable_compaction_projection",
+					version: 1,
+					customType: "pi-continuity/checkpoint/v1",
+					summary: "Malformed usage",
+					details: canonicalCheckpoint,
+					usage: malformedUsage,
 				},
 			}),
 		).toThrow("expected complete projection result");

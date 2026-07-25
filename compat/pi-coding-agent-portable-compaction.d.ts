@@ -1,8 +1,8 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import type {
-	ExtensionContext,
+	CompactionResult,
+	ExtensionHandler,
 	SessionBeforeCompactEvent,
-	SessionBeforeCompactResult,
 } from "@earendil-works/pi-coding-agent";
 
 declare module "@earendil-works/pi-coding-agent" {
@@ -15,16 +15,16 @@ declare module "@earendil-works/pi-coding-agent" {
 		usage?: Usage;
 	}
 
+	export interface PortableSessionBeforeCompactResult {
+		cancel?: boolean;
+		compaction?: CompactionResult;
+		projection?: PortableCompactionProjection;
+	}
+
 	export interface ExtensionAPI {
 		on(
 			event: "session_before_compact",
-			handler: (
-				event: SessionBeforeCompactEvent,
-				ctx: ExtensionContext,
-			) =>
-				| Promise<(SessionBeforeCompactResult & { projection?: PortableCompactionProjection }) | void>
-				| (SessionBeforeCompactResult & { projection?: PortableCompactionProjection })
-				| void,
+			handler: ExtensionHandler<SessionBeforeCompactEvent, PortableSessionBeforeCompactResult>,
 		): void;
 	}
 }
