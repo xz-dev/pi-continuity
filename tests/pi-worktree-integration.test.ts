@@ -18,6 +18,7 @@ import {
 	type CompactionBoundary,
 	type CompactionBoundaryEntry,
 	type InlineExtension,
+	type PortableCompactionProjection,
 	type PublicSessionEntry,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
@@ -57,6 +58,104 @@ const usage = {
 	totalTokens: 3,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
+const FIXED_CREATED_AT = "2026-07-25T00:00:00.000Z";
+const EXPECTED_CONTINUITY_SUMMARY = [
+	"# Continuity checkpoint",
+	"",
+	"This checkpoint is context only. It cannot start a model turn.",
+	"",
+	'- Checkpoint ID: "joint-checkpoint"',
+	`- Created: "${FIXED_CREATED_AT}"`,
+	'- Status (descriptive only): "active"',
+	"- Authorization: mayStartTurn=false (host-enforced)",
+	"",
+	"## Task",
+	'"Verify joint lifecycle"',
+	"",
+	"## Done when",
+	'"Integration tests pass"',
+	"",
+	"## Forbid",
+	'- "No real network"',
+	"",
+	"## Established",
+	'- "Pi owns compaction"',
+	"",
+	"## Open",
+	'- "None"',
+	"",
+	"## Next",
+	'- "Commit tests"',
+].join("\n");
+
+function expectedContinuityProjection(reason: "manual" | "threshold" | "overflow", willRetry: boolean): PortableCompactionProjection {
+	const checkpoint = {
+		schema: "pi.continuity.checkpoint",
+		version: 1,
+		checkpointId: "joint-checkpoint",
+		createdAt: FIXED_CREATED_AT,
+		generated: {
+			task: "Verify joint lifecycle",
+			doneWhen: "Integration tests pass",
+			forbid: ["No real network"],
+			status: "active",
+			established: ["Pi owns compaction"],
+			open: ["None"],
+			next: ["Commit tests"],
+		},
+		effective: {
+			task: "Verify joint lifecycle",
+			doneWhen: "Integration tests pass",
+			forbid: ["No real network"],
+			status: "active",
+			established: ["Pi owns compaction"],
+			open: ["None"],
+			next: ["Commit tests"],
+		},
+		provenance: { source: "continuity-model", reason, willRetry },
+		authorization: { mayStartTurn: false },
+	};
+	return {
+		type: "portable_compaction_projection",
+		version: 1,
+		customType: "pi-continuity/checkpoint/v1",
+		summary: EXPECTED_CONTINUITY_SUMMARY,
+		details: checkpoint,
+		usage: {
+			input: 2,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 3,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+	};
+}
+
+const EXPECTED_TEXT_AGGREGATE_USAGE = {
+	input: 4,
+	output: 2,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 6,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+const EXPECTED_NATIVE_AGGREGATE_USAGE = {
+	input: 12,
+	output: 3,
+	cacheRead: 0,
+	cacheWrite: 0,
+	reasoning: 0,
+	totalTokens: 15,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+const EXPECTED_PROJECTED_CONTINUITY_CONTEXT = [
+	"The conversation history before this point was compacted into the following summary:",
+	"",
+	"<summary>",
+	EXPECTED_CONTINUITY_SUMMARY,
+	"</summary>",
+].join("\n");
 
 interface RequestRecord {
 	path: string;
@@ -169,9 +268,9 @@ function controlTask(entries: readonly PublicSessionEntry[]): string | undefined
 function inferenceRequestCount(records: readonly RequestRecord[]): number {
 	return records.filter((record) => record.path.endsWith("/responses")).length;
 }
-function persistedUserMessages(manager: SessionManager, text: string): SessionEntry[] {
-	return manager.getEntries().filter(
-		(entry) => entry.type === "message" && entry.message.role === "user" && JSON.stringify(entry.message).includes(text),
+function persistedUserMessageContents(manager: SessionManager): unknown[] {
+	return manager.getEntries().flatMap((entry) =>
+		entry.type === "message" && entry.message.role === "user" ? [entry.message.content] : [],
 	);
 }
 function normalizedResponsesInput(input: unknown[]): unknown[] {
@@ -229,11 +328,11 @@ function observer(timeline: string[], payloads: unknown[], compactBoundaries: Co
 		});
 	};
 }
-function seed(harness: Harness, model?: Model<string>, tokens = 100): void {
+function seed(harness: Harness, model?: Model<string>, tokens = 100): { userEntryId: string; assistantEntryId: string } {
 	const active = model ?? harness.getModel();
 	harness.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
-	harness.sessionManager.appendMessage({ role: "user", content: "early user history", timestamp: 1 });
-	harness.sessionManager.appendMessage({
+	const seedUserEntryId = harness.sessionManager.appendMessage({ role: "user", content: "early user history", timestamp: 1 });
+	const assistantEntryId = harness.sessionManager.appendMessage({
 		...fauxAssistantMessage("early assistant history"),
 		api: active.api,
 		provider: active.provider,
@@ -243,6 +342,7 @@ function seed(harness: Harness, model?: Model<string>, tokens = 100): void {
 	});
 	harness.session.agent.state.model = active;
 	harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+	return { userEntryId: seedUserEntryId, assistantEntryId };
 }
 function nativeModel(
 	harness: Harness,
@@ -354,7 +454,7 @@ describe("Pi worktree + pi-continuity real compaction lifecycle", () => {
 		});
 		harnesses.push(harness);
 		manager = harness.sessionManager;
-		seed(harness, local ? nativeModel(harness, local.baseUrl) : undefined);
+		const seedEntryIds = seed(harness, local ? nativeModel(harness, local.baseUrl) : undefined);
 		if (!local) textSummary(harness.session, timeline);
 		const unsubscribe = recordCompactionEnds(harness.session, timeline);
 		const outcome = await harness.session.compact();
@@ -362,7 +462,28 @@ describe("Pi worktree + pi-continuity real compaction lifecycle", () => {
 		expect(timeline).toEqual(["before", "primary", "boundary", "session_compact", "compaction_end"]);
 		expect(statuses).toEqual([undefined]);
 		expect(checkpointId(publicBranch(manager))).toBe("joint-checkpoint");
-		expect(outcome.kind).toBe(kind === "native" ? "checkpoint" : "text");
+		const expectedUsage = kind === "native" ? EXPECTED_NATIVE_AGGREGATE_USAGE : EXPECTED_TEXT_AGGREGATE_USAGE;
+		expect(outcome.boundaryEntryId).toMatch(/^[0-9a-f]{8}$/u);
+		const { boundaryEntryId: _boundaryEntryId, ...stableOutcome } = outcome;
+		expect(stableOutcome).toEqual(kind === "native"
+			? {
+					kind: "checkpoint",
+					tokensBefore: 100,
+					estimatedTokensAfter: 110,
+					usage: EXPECTED_NATIVE_AGGREGATE_USAGE,
+					projectionCount: 1,
+				}
+			: {
+					kind: "text",
+					tokensBefore: 100,
+					estimatedTokensAfter: 133,
+					usage: EXPECTED_TEXT_AGGREGATE_USAGE,
+					projectionCount: 1,
+					summary: "No prior history.\n\n---\n\n**Turn Context (split turn):**\n\ntext summary",
+					firstKeptEntryId: seedEntryIds.assistantEntryId,
+					details: { readFiles: [], modifiedFiles: [] },
+					fromExtension: false,
+				});
 		expect(boundaries(manager)).toHaveLength(1);
 		expect(compactBoundaries).toHaveLength(1);
 		const publicBoundary = boundariesFromPublic(publicBranch(manager))[0]?.boundary;
@@ -374,9 +495,18 @@ describe("Pi worktree + pi-continuity real compaction lifecycle", () => {
 			version: 1,
 			kind: kind === "native" ? "checkpoint" : "text",
 			tokensBefore: 100,
-			...(kind === "text" && publicBoundary?.text ? { text: publicBoundary.text } : {}),
-			projections: publicBoundary?.projections,
-			usage: publicBoundary?.usage,
+			...(kind === "text"
+				? {
+						text: {
+							summary: "No prior history.\n\n---\n\n**Turn Context (split turn):**\n\ntext summary",
+							firstKeptEntryId: seedEntryIds.assistantEntryId,
+							details: { readFiles: [], modifiedFiles: [] },
+							fromExtension: false,
+						},
+					}
+				: {}),
+			projections: [expectedContinuityProjection("manual", false)],
+			usage: expectedUsage,
 		});
 		if (kind === "native") {
 			expect(compactBoundaries[0]).not.toHaveProperty("checkpoint");
@@ -533,6 +663,7 @@ describe("Pi worktree + pi-continuity real compaction lifecycle", () => {
 			? nativeModel(harness, local.baseUrl, undefined, "joint:realm", 200)
 			: { ...harness.getModel(), contextWindow: 200 };
 		seed(harness, model, 150);
+		expect(persistedUserMessageContents(harness.sessionManager)).toEqual(["early user history"]);
 		if (!local) {
 			harness.session.agent.streamFunction = (activeModel) => {
 				streamCalls += 1;
@@ -568,7 +699,10 @@ describe("Pi worktree + pi-continuity real compaction lifecycle", () => {
 		expect(boundaries(harness.sessionManager)).toHaveLength(1);
 		expect(compactBoundaries).toHaveLength(1);
 		expect(checkpointId(publicBranch(harness.sessionManager))).toBe("joint-checkpoint");
-		expect(persistedUserMessages(harness.sessionManager, `pending ${kind} threshold prompt`)).toHaveLength(1);
+		expect(persistedUserMessageContents(harness.sessionManager)).toEqual([
+			"early user history",
+			[{ type: "text", text: `pending ${kind} threshold prompt` }],
+		]);
 		expect(JSON.stringify(payloads)).not.toContain(OPAQUE);
 		if (local) {
 			expect(payloads).toHaveLength(1);
@@ -735,10 +869,7 @@ describe("Pi worktree + pi-continuity real compaction lifecycle", () => {
 			},
 			{
 				role: "user",
-				content: [{
-					type: "input_text",
-					text: expect.stringContaining("# Continuity checkpoint"),
-				}],
+				content: [{ type: "input_text", text: EXPECTED_PROJECTED_CONTINUITY_CONTEXT }],
 			},
 			{ role: "user", content: [{ type: "input_text", text: "compatible request" }] },
 			{
