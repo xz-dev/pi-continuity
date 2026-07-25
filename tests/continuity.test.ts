@@ -1,3 +1,4 @@
+import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -11,6 +12,7 @@ import {
 	parseControl,
 	parseModelCheckpoint,
 	renderSummary,
+	type ContinuityCheckpointV1,
 } from "../extensions/continuity.js";
 
 const generated = {
@@ -109,20 +111,59 @@ function createFakeExtension(complete = vi.fn()) {
 	return { handlers, getCommand: () => command, appendEntry };
 }
 
-function projectionResult(value: unknown) {
-	if (!value || typeof value !== "object" || !("projection" in value)) {
-		throw new Error("expected projection result");
-	}
-	return value as {
-		projection: {
-			type: string;
-			version: number;
-			customType: string;
-			summary: string;
-			details: typeof canonicalCheckpoint;
-			usage: typeof usage;
-		};
+interface ProjectionResult {
+	projection: {
+		type: "portable_compaction_projection";
+		version: 1;
+		customType: "pi-continuity/checkpoint/v1";
+		summary: string;
+		details: ContinuityCheckpointV1;
+		usage: Usage;
 	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+	const actual = Object.keys(value).sort();
+	const expected = [...keys].sort();
+	return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function hasNumberFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
+	return fields.every((field) => typeof value[field] === "number");
+}
+
+function isUsage(value: unknown): value is Usage {
+	if (!isRecord(value) || !hasNumberFields(value, ["input", "output", "cacheRead", "cacheWrite", "totalTokens"])) {
+		return false;
+	}
+	return (
+		isRecord(value.cost) &&
+		hasNumberFields(value.cost, ["input", "output", "cacheRead", "cacheWrite", "total"])
+	);
+}
+
+function isProjectionResult(value: unknown): value is ProjectionResult {
+	if (!isRecord(value) || !hasExactKeys(value, ["projection"]) || !isRecord(value.projection)) return false;
+	const projection = value.projection;
+	return (
+		hasExactKeys(projection, ["type", "version", "customType", "summary", "details", "usage"]) &&
+		projection.type === "portable_compaction_projection" &&
+		projection.version === 1 &&
+		projection.customType === "pi-continuity/checkpoint/v1" &&
+		typeof projection.summary === "string" &&
+		projection.summary.length > 0 &&
+		parseCheckpoint(projection.details) !== undefined &&
+		isUsage(projection.usage)
+	);
+}
+
+function projectionResult(value: unknown): ProjectionResult {
+	if (!isProjectionResult(value)) throw new Error("expected complete projection result");
+	return value;
 }
 
 function context(branch: unknown[] = []) {
@@ -394,6 +435,24 @@ describe("extension registration", () => {
 		expect(notifyAfter).toHaveBeenCalledWith(expect.stringContaining('"Ship the standalone package"'), "info");
 	});
 
+	it("rejects malformed projection envelopes and details at the test boundary", () => {
+		expect(() => projectionResult({ projection: { type: "portable_compaction_projection" } })).toThrow(
+			"expected complete projection result",
+		);
+		expect(() =>
+			projectionResult({
+				projection: {
+					type: "portable_compaction_projection",
+					version: 1,
+					customType: "pi-continuity/checkpoint/v1",
+					summary: "Malformed details",
+					details: { ...canonicalCheckpoint, authorization: { mayStartTurn: true } },
+					usage,
+				},
+			}),
+		).toThrow("expected complete projection result");
+	});
+
 	it("synthesizes when auth is ok even when apiKey is undefined and passes event.signal", async () => {
 		const complete = vi.fn().mockResolvedValue({
 			content: [{ type: "text", text: JSON.stringify(generated) }],
@@ -403,6 +462,36 @@ describe("extension registration", () => {
 		const fake = createFakeExtension(complete);
 		const event = beforeCompactEvent();
 		const before = fake.handlers.get("session_before_compact")?.[0];
+		const expectedCheckpoint: ContinuityCheckpointV1 = {
+			schema: "pi.continuity.checkpoint",
+			version: 1,
+			checkpointId: "checkpoint-test",
+			createdAt: "2026-07-24T09:00:00.000Z",
+			generated: {
+				task: "Ship the standalone package",
+				doneWhen: "All verification commands pass",
+				forbid: ["Do not push"],
+				status: "active",
+				established: ["Pi version is 0.82.0"],
+				open: ["Install smoke"],
+				next: ["Run tests"],
+			},
+			effective: {
+				task: "Ship the standalone package",
+				doneWhen: "All verification commands pass",
+				forbid: ["Do not push"],
+				status: "active",
+				established: ["Pi version is 0.82.0"],
+				open: ["Install smoke"],
+				next: ["Run tests"],
+			},
+			provenance: {
+				source: "continuity-model",
+				reason: "manual",
+				willRetry: false,
+			},
+			authorization: { mayStartTurn: false },
+		};
 
 		const result = projectionResult(await before?.(event, context()));
 
@@ -411,17 +500,19 @@ describe("extension registration", () => {
 				type: "portable_compaction_projection",
 				version: 1,
 				customType: "pi-continuity/checkpoint/v1",
-				summary: renderSummary(result.projection.details),
-				details: result.projection.details,
-				usage,
+				summary: renderSummary(expectedCheckpoint),
+				details: expectedCheckpoint,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
 			},
 		});
 		expect(result).not.toHaveProperty("compaction");
-		expect(result.projection.details).toMatchObject({
-			generated,
-			provenance: { reason: "manual", willRetry: false },
-			authorization: { mayStartTurn: false },
-		});
 		expect(complete).toHaveBeenCalledOnce();
 		expect(complete.mock.calls[0]?.[2]).toMatchObject({ apiKey: undefined, signal: event.signal });
 	});

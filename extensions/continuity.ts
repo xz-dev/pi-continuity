@@ -1,7 +1,6 @@
 import { type Usage, uuidv7 } from "@earendil-works/pi-ai";
 import { complete } from "@earendil-works/pi-ai/compat";
 import type {
-	CompactionBoundaryEntry,
 	ExtensionAPI,
 	ExtensionContext,
 	PortableCompactionProjection,
@@ -86,7 +85,9 @@ interface BranchEntry {
 	customType?: string;
 	data?: unknown;
 	details?: unknown;
-	boundary?: Pick<CompactionBoundaryEntry["boundary"], "projections">;
+	boundary?: {
+		projections?: unknown;
+	};
 }
 
 export interface CheckpointMetadata {
