@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { resolvePiVitest } from "./pi-worktree-paths.mjs";
 
 const implementationFloor = "0f979e9eef5a160fcae3c07cd14591d8ab15f70c";
 const defaultRepo = "/home/xz/Code/ai/pi-worktrees/patch-tmp-6492";
@@ -34,10 +35,16 @@ const required = [
 	"packages/coding-agent/src/index.ts",
 	"packages/tui/src/index.ts",
 	"packages/coding-agent/test/suite/harness.ts",
-	"packages/coding-agent/node_modules/vitest/vitest.mjs",
 ];
 for (const relative of required) {
 	if (!existsSync(resolve(piRepo, relative))) fail(`required Pi source/harness/runtime is missing: ${relative}`);
+}
+
+let vitestEntry;
+try {
+	vitestEntry = resolvePiVitest(piRepo);
+} catch (error) {
+	fail(error instanceof Error ? error.message : String(error));
 }
 
 const integrationTest = resolve("tests/pi-worktree-integration.test.ts");
@@ -86,7 +93,7 @@ try {
 if (typecheckFailure) fail(typecheckFailure);
 
 const vitest = spawnSync(process.execPath, [
-	resolve(piRepo, "packages/coding-agent/node_modules/vitest/vitest.mjs"),
+	vitestEntry,
 	"--config",
 	resolve("tests/pi-worktree.vitest.config.ts"),
 	"--run",
