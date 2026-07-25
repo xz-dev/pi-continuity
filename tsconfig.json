@@ -9,5 +9,6 @@
     "verbatimModuleSyntax": true,
     "types": ["node", "vitest/globals"]
   },
-  "include": ["compat/**/*.d.ts", "extensions/**/*.ts", "tests/**/*.ts"]
+  "include": ["compat/**/*.d.ts", "extensions/**/*.ts", "tests/**/*.ts"],
+  "exclude": ["tests/pi-worktree-integration.test.ts", "tests/pi-worktree.vitest.config.ts"]
 }

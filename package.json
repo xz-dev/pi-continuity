@@ -34,7 +34,8 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "vitest --run"
+    "test": "vitest --run --exclude tests/pi-worktree-integration.test.ts",
+    "test:pi-worktree": "node scripts/test-pi-worktree.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
