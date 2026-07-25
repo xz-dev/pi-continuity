@@ -41,46 +41,50 @@ if (transparentCheck.status !== 0) {
 	console.error(`test:pi-worktree: warning: ${piRepo} at ${head} does not contain transparent-compaction head ${transparentHead}; lifecycle tests may fail until Tasks 1-6 are integrated`);
 }
 
-const temporaryDirectory = mkdtempSync(join(tmpdir(), "pi-continuity-typecheck-"));
-const typecheckConfig = join(temporaryDirectory, "tsconfig.json");
 const integrationTest = resolve("tests/pi-worktree-integration.test.ts");
-const ambientTypes = join(temporaryDirectory, "ambient.d.ts");
-writeFileSync(ambientTypes, 'declare module "highlight.js/lib/index.js";\n');
-const piConfig = JSON.parse(readFileSync(resolve(piRepo, "tsconfig.json"), "utf8"));
-const piPaths = piConfig.compilerOptions?.paths ?? {};
-const paths = Object.fromEntries(Object.entries(piPaths).map(([name, targets]) => [
-	name,
-	Array.isArray(targets)
-		? targets.map((target) => resolve(piRepo, target.includes("/src/*") ? target.replace(/\*$/, "*.ts") : target))
-		: targets,
-]));
-paths["pi-test-harness"] = [resolve(piRepo, "packages/coding-agent/test/suite/harness.ts")];
-paths["pi-test-utilities"] = [resolve(piRepo, "packages/coding-agent/test/utilities.ts")];
-writeFileSync(typecheckConfig, JSON.stringify({
-	extends: resolve(piRepo, "tsconfig.json"),
-	compilerOptions: {
-		target: "ES2024",
-		noEmit: true,
-		strict: true,
-		noImplicitAny: true,
-		baseUrl: process.cwd(),
-		typeRoots: [resolve("node_modules/@types"), resolve(piRepo, "node_modules/@types")],
-		paths,
-	},
-	files: [ambientTypes, integrationTest],
-	include: [],
-	exclude: [],
-}, null, 2));
+const temporaryDirectory = mkdtempSync(join(tmpdir(), "pi-continuity-typecheck-"));
+let typecheckFailure;
 try {
+	const typecheckConfig = join(temporaryDirectory, "tsconfig.json");
+	const ambientTypes = join(temporaryDirectory, "ambient.d.ts");
+	writeFileSync(ambientTypes, 'declare module "highlight.js/lib/index.js";\n');
+	const piConfig = JSON.parse(readFileSync(resolve(piRepo, "tsconfig.json"), "utf8"));
+	const piPaths = piConfig.compilerOptions?.paths ?? {};
+	const paths = Object.fromEntries(Object.entries(piPaths).map(([name, targets]) => [
+		name,
+		Array.isArray(targets)
+			? targets.map((target) => resolve(piRepo, target.includes("/src/*") ? target.replace(/\*$/, "*.ts") : target))
+			: targets,
+	]));
+	paths["pi-test-harness"] = [resolve(piRepo, "packages/coding-agent/test/suite/harness.ts")];
+	paths["pi-test-utilities"] = [resolve(piRepo, "packages/coding-agent/test/utilities.ts")];
+	writeFileSync(typecheckConfig, JSON.stringify({
+		extends: resolve(piRepo, "tsconfig.json"),
+		compilerOptions: {
+			target: "ES2024",
+			noEmit: true,
+			strict: true,
+			noImplicitAny: true,
+			baseUrl: process.cwd(),
+			typeRoots: [resolve("node_modules/@types"), resolve(piRepo, "node_modules/@types")],
+			paths,
+		},
+		files: [ambientTypes, integrationTest],
+		include: [],
+		exclude: [],
+	}, null, 2));
 	const typecheck = spawnSync(process.execPath, [resolve("node_modules/typescript/bin/tsc"), "-p", typecheckConfig], {
 		stdio: "inherit",
 	});
-	if (typecheck.error) fail(`failed to start integration typecheck: ${typecheck.error.message}`);
-	if (typecheck.signal) process.kill(process.pid, typecheck.signal);
-	if (typecheck.status !== 0) process.exit(typecheck.status ?? 1);
+	if (typecheck.error) typecheckFailure = `failed to start integration typecheck: ${typecheck.error.message}`;
+	else if (typecheck.signal) typecheckFailure = `integration typecheck terminated by ${typecheck.signal}`;
+	else if (typecheck.status !== 0) typecheckFailure = `integration typecheck exited with status ${typecheck.status ?? 1}`;
+} catch (error) {
+	typecheckFailure = `integration typecheck setup failed: ${error instanceof Error ? error.message : String(error)}`;
 } finally {
 	rmSync(temporaryDirectory, { recursive: true, force: true });
 }
+if (typecheckFailure) fail(typecheckFailure);
 
 const vitest = spawnSync(process.execPath, [
 	resolve(piRepo, "packages/coding-agent/node_modules/vitest/vitest.mjs"),

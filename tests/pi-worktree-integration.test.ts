@@ -169,6 +169,22 @@ function controlTask(entries: readonly PublicSessionEntry[]): string | undefined
 function inferenceRequestCount(records: readonly RequestRecord[]): number {
 	return records.filter((record) => record.path.endsWith("/responses")).length;
 }
+function persistedUserMessages(manager: SessionManager, text: string): SessionEntry[] {
+	return manager.getEntries().filter(
+		(entry) => entry.type === "message" && entry.message.role === "user" && JSON.stringify(entry.message).includes(text),
+	);
+}
+function normalizedResponsesInput(input: unknown[]): unknown[] {
+	return input.map((item) => {
+		if (!isRecord(item)) return item;
+		if (item.role === "system") return { ...item, content: "<system prompt>" };
+		if (item.type === "message" && typeof item.id === "string") return { ...item, id: "<message id>" };
+		return item;
+	});
+}
+function sanitizedBoundary(boundary: CompactionBoundary): CompactionBoundary {
+	return { ...boundary, id: "<boundary id>", parentId: "<parent id>", timestamp: "<timestamp>" };
+}
 
 interface ContinuityOptions {
 	contribute?: () => boolean;
@@ -228,13 +244,20 @@ function seed(harness: Harness, model?: Model<string>, tokens = 100): void {
 	harness.session.agent.state.model = active;
 	harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
 }
-function nativeModel(harness: Harness, baseUrl: string, id?: string, realm = "joint:realm"): Model<"openai-responses"> {
+function nativeModel(
+	harness: Harness,
+	baseUrl: string,
+	id?: string,
+	realm = "joint:realm",
+	contextWindow?: number,
+): Model<"openai-responses"> {
 	const base = id ? harness.getModel(id) : harness.getModel();
 	if (!base) throw new Error(`Missing faux model ${id ?? "default"}`);
 	return {
 		...base,
 		api: "openai-responses",
 		baseUrl,
+		...(contextWindow !== undefined ? { contextWindow } : {}),
 		compat: { responsesCompaction: { adapter: "openai-responses-compact-v1", realm, modelFamily: "joint" } },
 	};
 }
@@ -318,6 +341,7 @@ describe("Pi worktree + pi-continuity real compaction lifecycle", () => {
 	it.each(["text", "native"] as const)("orders manual %s compaction around real persistence and actual status", async (kind) => {
 		const timeline: string[] = [];
 		const statuses: Array<string | undefined> = [];
+		const compactBoundaries: CompactionBoundary[] = [];
 		let manager: SessionManager | undefined;
 		const local = kind === "native"
 			? await localResponses({ onRequest: (record) => {
@@ -325,7 +349,9 @@ describe("Pi worktree + pi-continuity real compaction lifecycle", () => {
 			} })
 			: undefined;
 		if (local) servers.push(local);
-		const harness = await createHarness({ extensionFactories: [continuityFactory(timeline, statuses)] });
+		const harness = await createHarness({
+			extensionFactories: [continuityFactory(timeline, statuses), observer(timeline, [], compactBoundaries)],
+		});
 		harnesses.push(harness);
 		manager = harness.sessionManager;
 		seed(harness, local ? nativeModel(harness, local.baseUrl) : undefined);
@@ -338,6 +364,219 @@ describe("Pi worktree + pi-continuity real compaction lifecycle", () => {
 		expect(checkpointId(publicBranch(manager))).toBe("joint-checkpoint");
 		expect(outcome.kind).toBe(kind === "native" ? "checkpoint" : "text");
 		expect(boundaries(manager)).toHaveLength(1);
+		expect(compactBoundaries).toHaveLength(1);
+		const publicBoundary = boundariesFromPublic(publicBranch(manager))[0]?.boundary;
+		expect(compactBoundaries[0]).toEqual(publicBoundary);
+		expect(sanitizedBoundary(compactBoundaries[0])).toEqual({
+			id: "<boundary id>",
+			parentId: "<parent id>",
+			timestamp: "<timestamp>",
+			version: 1,
+			kind: kind === "native" ? "checkpoint" : "text",
+			tokensBefore: 100,
+			...(kind === "text" && publicBoundary?.text ? { text: publicBoundary.text } : {}),
+			projections: publicBoundary?.projections,
+			usage: publicBoundary?.usage,
+		});
+		if (kind === "native") {
+			expect(compactBoundaries[0]).not.toHaveProperty("checkpoint");
+			expect(JSON.stringify(compactBoundaries[0])).not.toContain(OPAQUE);
+		}
+	});
+
+	it("cancels before transport or public checkpoint state even after earlier contributions", async () => {
+		const timeline: string[] = [];
+		const statuses: Array<string | undefined> = [];
+		let laterHandlerCalled = false;
+		const local = await localResponses();
+		servers.push(local);
+		const harness = await createHarness({
+			extensionFactories: [
+				continuityFactory(timeline, statuses),
+				(pi) => pi.on("session_before_compact", (event) => ({
+					compaction: {
+						summary: "discarded replacement",
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+					},
+				})),
+				(pi) => pi.on("session_before_compact", () => ({ cancel: true })),
+				(pi) => pi.on("session_before_compact", () => {
+					laterHandlerCalled = true;
+				}),
+			],
+		});
+		harnesses.push(harness);
+		seed(harness, nativeModel(harness, local.baseUrl));
+		const successfulEndsBefore = harness.eventsOfType("compaction_end").filter((event) => event.result !== undefined).length;
+
+		await expect(harness.session.compact()).rejects.toThrow(/cancel/i);
+
+		expect(statuses).toEqual([undefined]);
+		expect(local.requests).toHaveLength(0);
+		expect(inferenceRequestCount(local.requests)).toBe(0);
+		expect(boundaries(harness.sessionManager)).toHaveLength(0);
+		expect(timeline).toEqual(["before"]);
+		expect(laterHandlerCalled).toBe(false);
+		expect(checkpointId(publicBranch(harness.sessionManager))).toBeUndefined();
+		expect(harness.eventsOfType("compaction_end").filter((event) => event.result !== undefined)).toHaveLength(successfulEndsBefore);
+	});
+
+	it("uses the last genuine legacy replacement as the sole text primary", async () => {
+		const timeline: string[] = [];
+		const statuses: Array<string | undefined> = [];
+		const compactBoundaries: CompactionBoundary[] = [];
+		let replacementFirstKeptEntryId: string | undefined;
+		const local = await localResponses();
+		servers.push(local);
+		const harness = await createHarness({
+			extensionFactories: [
+				continuityFactory(timeline, statuses),
+				(pi) => pi.on("session_before_compact", (event) => ({
+					compaction: {
+						summary: "superseded legacy summary",
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+						details: { replacement: 1 },
+					},
+				})),
+				(pi) => pi.on("session_before_compact", (event) => {
+					replacementFirstKeptEntryId = event.preparation.firstKeptEntryId;
+					return {
+						compaction: {
+							summary: "winning legacy summary",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: { replacement: 2 },
+						},
+					};
+				}),
+				observer(timeline, [], compactBoundaries),
+			],
+		});
+		harnesses.push(harness);
+		seed(harness, nativeModel(harness, local.baseUrl));
+		textSummary(harness.session, timeline, "built-in summary must not run");
+
+		const outcome = await harness.session.compact();
+		if (!replacementFirstKeptEntryId) throw new Error("Replacement did not receive a valid first kept entry");
+		expect(harness.sessionManager.getEntry(replacementFirstKeptEntryId)).toBeDefined();
+
+		expect(local.requests).toHaveLength(0);
+		expect(timeline).toEqual(["before", "boundary", "session_compact"]);
+		expect(statuses).toEqual([undefined]);
+		expect(outcome).toMatchObject({
+			kind: "text",
+			summary: "winning legacy summary",
+			firstKeptEntryId: replacementFirstKeptEntryId,
+			details: { replacement: 2 },
+			fromExtension: true,
+			projectionCount: 1,
+		});
+		expect(boundaries(harness.sessionManager)).toHaveLength(1);
+		expect(boundaries(harness.sessionManager)[0]?.boundary.primary).toMatchObject({
+			kind: "text",
+			summary: "winning legacy summary",
+			firstKeptEntryId: replacementFirstKeptEntryId,
+			details: { replacement: 2 },
+			fromExtension: true,
+		});
+		expect(compactBoundaries).toHaveLength(1);
+		expect(sanitizedBoundary(compactBoundaries[0])).toMatchObject({
+			id: "<boundary id>",
+			parentId: "<parent id>",
+			timestamp: "<timestamp>",
+			version: 1,
+			kind: "text",
+			tokensBefore: 100,
+			text: {
+				summary: "winning legacy summary",
+				firstKeptEntryId: replacementFirstKeptEntryId,
+				details: { replacement: 2 },
+				fromExtension: true,
+			},
+			projections: [expect.objectContaining({
+				type: "portable_compaction_projection",
+				version: 1,
+				customType: "pi-continuity/checkpoint/v1",
+			})],
+		});
+		expect(JSON.stringify(compactBoundaries[0])).not.toContain(OPAQUE);
+		expect(checkpointId(publicBranch(harness.sessionManager))).toBe("joint-checkpoint");
+	});
+
+	it.each(["text", "native"] as const)("runs real pre-prompt threshold %s compaction before one pending inference", async (kind) => {
+		const timeline: string[] = [];
+		const statuses: Array<string | undefined> = [];
+		const payloads: unknown[] = [];
+		const compactBoundaries: CompactionBoundary[] = [];
+		let manager: SessionManager | undefined;
+		let streamCalls = 0;
+		const local = kind === "native"
+			? await localResponses({ onRequest: (record) => {
+				if (record.path.endsWith("/responses/compact")) timeline.push("primary");
+				if (record.path.endsWith("/responses")) {
+					expect(manager && boundaries(manager)).toHaveLength(1);
+					expect(timeline).toContain("session_compact");
+					expect(timeline).toContain("compaction_end");
+				}
+			} })
+			: undefined;
+		if (local) servers.push(local);
+		const harness = await createHarness({
+			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 100 } },
+			extensionFactories: [continuityFactory(timeline, statuses), observer(timeline, payloads, compactBoundaries)],
+		});
+		harnesses.push(harness);
+		manager = harness.sessionManager;
+		const model = local
+			? nativeModel(harness, local.baseUrl, undefined, "joint:realm", 200)
+			: { ...harness.getModel(), contextWindow: 200 };
+		seed(harness, model, 150);
+		if (!local) {
+			harness.session.agent.streamFunction = (activeModel) => {
+				streamCalls += 1;
+				if (streamCalls === 1) timeline.push("primary");
+				else {
+					timeline.push("inference");
+					expect(manager && boundaries(manager)).toHaveLength(1);
+					expect(timeline).toContain("session_compact");
+					expect(timeline).toContain("compaction_end");
+				}
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() => stream.push({
+					type: "done",
+					reason: "stop",
+					message: {
+						...fauxAssistantMessage(streamCalls === 1 ? "threshold summary" : "inference answer"),
+						api: activeModel.api,
+						provider: activeModel.provider,
+						model: activeModel.id,
+						usage,
+					},
+				}));
+				return stream;
+			};
+		}
+		const unsubscribe = recordCompactionEnds(harness.session, timeline);
+
+		await harness.session.prompt(`pending ${kind} threshold prompt`);
+		unsubscribe();
+
+		expect(timeline).toEqual(["before", "primary", "boundary", "session_compact", "compaction_end", "inference"]);
+		expect(statuses).toEqual([undefined]);
+		expect(boundaries(harness.sessionManager)).toHaveLength(1);
+		expect(compactBoundaries).toHaveLength(1);
+		expect(checkpointId(publicBranch(harness.sessionManager))).toBe("joint-checkpoint");
+		expect(persistedUserMessages(harness.sessionManager, `pending ${kind} threshold prompt`)).toHaveLength(1);
+		expect(JSON.stringify(payloads)).not.toContain(OPAQUE);
+		if (local) {
+			expect(payloads).toHaveLength(1);
+			expect(local.requests.map((record) => record.path)).toEqual(["/v1/responses/compact", "/v1/responses"]);
+			expect(inferenceRequestCount(local.requests)).toBe(1);
+		} else {
+			expect(streamCalls).toBe(2);
+		}
 	});
 
 	it("commits an overflow boundary before session_compact and exactly one retry", async () => {
@@ -484,13 +723,33 @@ describe("Pi worktree + pi-continuity real compaction lifecycle", () => {
 		const incompatibleInput = incompatibleRequest?.input;
 		if (!Array.isArray(incompatibleInput)) throw new Error("Incompatible request has no input array");
 		expect(JSON.stringify(incompatibleInput)).not.toContain(OPAQUE);
-		const orderedPortableInput = JSON.stringify(incompatibleInput.slice(1, 4));
-		const userIndex = orderedPortableInput.indexOf("early user history");
-		const assistantIndex = orderedPortableInput.indexOf("early assistant history");
-		const projectionIndex = orderedPortableInput.indexOf("Verify joint lifecycle");
-		expect(userIndex).toBeGreaterThanOrEqual(0);
-		expect(assistantIndex).toBeGreaterThan(userIndex);
-		expect(projectionIndex).toBeGreaterThan(assistantIndex);
+		expect(normalizedResponsesInput(incompatibleInput)).toEqual([
+			{ role: "system", content: "<system prompt>" },
+			{ role: "user", content: [{ type: "input_text", text: "early user history" }] },
+			{
+				type: "message",
+				role: "assistant",
+				content: [{ type: "output_text", text: "early assistant history", annotations: [] }],
+				status: "completed",
+				id: "<message id>",
+			},
+			{
+				role: "user",
+				content: [{
+					type: "input_text",
+					text: expect.stringContaining("# Continuity checkpoint"),
+				}],
+			},
+			{ role: "user", content: [{ type: "input_text", text: "compatible request" }] },
+			{
+				type: "message",
+				role: "assistant",
+				content: [{ type: "output_text", text: "ok", annotations: [] }],
+				status: "completed",
+				id: "<message id>",
+			},
+			{ role: "user", content: [{ type: "input_text", text: "incompatible request" }] },
+		]);
 		for (const payload of payloads) expect(JSON.stringify(payload)).not.toContain(OPAQUE);
 	});
 
