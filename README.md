@@ -6,7 +6,7 @@ The projection is context for the next genuine user turn. Its authorization expl
 
 ## Compatibility
 
-Version 0.2.0 requires Node.js 22.19.0 or newer and Pi with the provider-transparent compaction lifecycle introduced by Git commit `0f979e9e` (or a downstream build carrying the transparent-compaction patch). No published Pi version contains that lifecycle yet.
+Version 0.2.0 requires Node.js 22.19.0 or newer and Pi implementation commit `0f979e9e` or a descendant/downstream patch carrying the provider-transparent compaction lifecycle. No published Pi version contains that lifecycle yet.
 
 The normal checks use the packaged Pi types. `npm run test:pi-worktree` additionally performs a strict, source-aliased typecheck and exercises the actual Pi lifecycle against a compatible Pi Git worktree. Set the absolute `PI_REPO` path to select that worktree:
 
@@ -66,7 +66,7 @@ Each committed generic compaction boundary supersedes the prior continuity check
 
 ## Design and non-goals
 
-Canonical checkpoint details are versioned and strict. They retain both the model-generated baseline and the effective projection after user controls, so unlocking a field restores the generated value. Pi-authored fields include checkpoint identity, timestamp, compaction provenance, and `authorization.mayStartTurn: false`; the model supplies only bounded task-state fields. The Markdown summary is derived deterministically from the effective projection. User controls are custom entries that do not enter LLM context.
+Canonical checkpoint details are versioned and strict. They retain both the model-generated baseline and the effective projection after user controls, so unlocking a field restores the generated value. Continuity creates the checkpoint identity, timestamp, compaction metadata, and `authorization.mayStartTurn: false` from Pi lifecycle provenance; the model supplies only bounded task-state fields. The Markdown summary is derived deterministically from the effective projection. User controls are custom entries that do not enter LLM context.
 
 This package supplies one provider-neutral additive projection. It does not replace or reinterpret Pi's primary compaction, implement Oh My Pi `preserveData` semantics, or manage provider-native remote compaction. It does not trigger messages, schedule timers, or maintain a filesystem ledger.
 
