@@ -41,7 +41,7 @@ describe("Pi worktree compatibility runner", () => {
 
 		expect(result.status).not.toBe(0);
 		expect(output).toContain(
-			`Pi HEAD must contain implementation commit ${FLOOR} or a descendant/downstream patch`,
+			`Pi HEAD must descend from exact implementation commit ${FLOOR}; downstream builds must preserve that commit object in Git ancestry`,
 		);
 		expect(output).not.toMatch(/node_modules\/typescript\/bin\/tsc|pi-worktree\.vitest\.config|vitest\.mjs/u);
 	});

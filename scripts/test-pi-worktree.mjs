@@ -24,7 +24,7 @@ const head = git(["rev-parse", "HEAD"]).stdout.trim();
 const floorCheck = git(["merge-base", "--is-ancestor", implementationFloor, "HEAD"]);
 if (floorCheck.status !== 0) {
 	fail(
-		`Pi HEAD must contain implementation commit ${implementationFloor} or a descendant/downstream patch; found ${head || "unknown HEAD"} at ${piRepo}`,
+		`Pi HEAD must descend from exact implementation commit ${implementationFloor}; downstream builds must preserve that commit object in Git ancestry; found ${head || "unknown HEAD"} at ${piRepo}`,
 	);
 }
 

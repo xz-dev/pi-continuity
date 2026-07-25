@@ -6,7 +6,7 @@ The projection is context for the next genuine user turn. Its authorization expl
 
 ## Compatibility
 
-Version 0.2.0 requires Node.js 22.19.0 or newer and Pi implementation commit `0f979e9e` or a descendant/downstream patch carrying the provider-transparent compaction lifecycle. No published Pi version contains that lifecycle yet.
+Version 0.2.0 requires Node.js 22.19.0 or newer and a Pi worktree whose `HEAD` descends from exact implementation commit `0f979e9eef5a160fcae3c07cd14591d8ab15f70c`. Downstream builds must preserve that commit object in Git ancestry; an equivalent cherry-picked patch without that commit object is not accepted. No published Pi version contains that lifecycle yet.
 
 The normal checks use the packaged Pi types. `npm run test:pi-worktree` additionally performs a strict, source-aliased typecheck and exercises the actual Pi lifecycle against a compatible Pi Git worktree. Set the absolute `PI_REPO` path to select that worktree:
 
