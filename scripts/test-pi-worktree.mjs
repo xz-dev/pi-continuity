@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { existsSync, statSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
 const baseline = "8a4bac2faf646c77206fb03d465afe914a0db96d";
 const transparentHead = "29b293a05459289d12a1e335e6717b2c3f2b445a";
@@ -40,18 +41,57 @@ if (transparentCheck.status !== 0) {
 	console.error(`test:pi-worktree: warning: ${piRepo} at ${head} does not contain transparent-compaction head ${transparentHead}; lifecycle tests may fail until Tasks 1-6 are integrated`);
 }
 
-const child = spawn(process.execPath, [
+const temporaryDirectory = mkdtempSync(join(tmpdir(), "pi-continuity-typecheck-"));
+const typecheckConfig = join(temporaryDirectory, "tsconfig.json");
+const integrationTest = resolve("tests/pi-worktree-integration.test.ts");
+const ambientTypes = join(temporaryDirectory, "ambient.d.ts");
+writeFileSync(ambientTypes, 'declare module "highlight.js/lib/index.js";\n');
+const piConfig = JSON.parse(readFileSync(resolve(piRepo, "tsconfig.json"), "utf8"));
+const piPaths = piConfig.compilerOptions?.paths ?? {};
+const paths = Object.fromEntries(Object.entries(piPaths).map(([name, targets]) => [
+	name,
+	Array.isArray(targets)
+		? targets.map((target) => resolve(piRepo, target.includes("/src/*") ? target.replace(/\*$/, "*.ts") : target))
+		: targets,
+]));
+paths["pi-test-harness"] = [resolve(piRepo, "packages/coding-agent/test/suite/harness.ts")];
+paths["pi-test-utilities"] = [resolve(piRepo, "packages/coding-agent/test/utilities.ts")];
+writeFileSync(typecheckConfig, JSON.stringify({
+	extends: resolve(piRepo, "tsconfig.json"),
+	compilerOptions: {
+		target: "ES2024",
+		noEmit: true,
+		strict: true,
+		noImplicitAny: true,
+		baseUrl: process.cwd(),
+		typeRoots: [resolve("node_modules/@types"), resolve(piRepo, "node_modules/@types")],
+		paths,
+	},
+	files: [ambientTypes, integrationTest],
+	include: [],
+	exclude: [],
+}, null, 2));
+try {
+	const typecheck = spawnSync(process.execPath, [resolve("node_modules/typescript/bin/tsc"), "-p", typecheckConfig], {
+		stdio: "inherit",
+	});
+	if (typecheck.error) fail(`failed to start integration typecheck: ${typecheck.error.message}`);
+	if (typecheck.signal) process.kill(process.pid, typecheck.signal);
+	if (typecheck.status !== 0) process.exit(typecheck.status ?? 1);
+} finally {
+	rmSync(temporaryDirectory, { recursive: true, force: true });
+}
+
+const vitest = spawnSync(process.execPath, [
 	resolve(piRepo, "packages/coding-agent/node_modules/vitest/vitest.mjs"),
 	"--config",
 	resolve("tests/pi-worktree.vitest.config.ts"),
 	"--run",
-	resolve("tests/pi-worktree-integration.test.ts"),
+	integrationTest,
 ], {
 	stdio: "inherit",
 	env: { ...process.env, PI_REPO: piRepo },
 });
-child.on("error", (error) => fail(`failed to start Pi Vitest: ${error.message}`));
-child.on("exit", (code, signal) => {
-	if (signal) process.kill(process.pid, signal);
-	process.exit(code ?? 1);
-});
+if (vitest.error) fail(`failed to start Pi Vitest: ${vitest.error.message}`);
+if (vitest.signal) process.kill(process.pid, vitest.signal);
+process.exit(vitest.status ?? 1);
