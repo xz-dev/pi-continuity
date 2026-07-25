@@ -36,6 +36,30 @@ function entry(type: string, fields: Record<string, unknown> = {}) {
 	return { type, ...fields };
 }
 
+function boundary(projections: unknown[] = [], kind: "text" | "checkpoint" = "text") {
+	return entry("compaction_boundary", {
+		boundary: {
+			id: `boundary-${kind}`,
+			parentId: null,
+			timestamp: "2026-07-24T09:00:00.000Z",
+			version: 1,
+			kind,
+			tokensBefore: 123,
+			projections,
+		},
+	});
+}
+
+function continuityProjection(details: unknown = canonicalCheckpoint) {
+	return {
+		type: "portable_compaction_projection",
+		version: 1,
+		customType: "pi-continuity/checkpoint/v1",
+		summary: "Portable continuity summary",
+		details,
+	};
+}
+
 function setControl(field: "task" | "doneWhen" | "forbid" | "status", value: string | string[]) {
 	return entry("custom", {
 		customType: CONTROL_TYPE,
@@ -51,14 +75,19 @@ function unlockControl(field: "task" | "doneWhen" | "forbid" | "status" | "all")
 }
 
 function createFakeExtension(complete = vi.fn()) {
-	const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
-	let command: { handler: (args: string, ctx: any) => Promise<void> } | undefined;
+	type TestHandler = (event: unknown, ctx: unknown) => Promise<unknown>;
+	type CommandContext = {
+		ui: { notify: (message: string, level: string) => void };
+		appendEntry?: () => never;
+	};
+	const handlers = new Map<string, TestHandler[]>();
+	let command: { handler: (args: string, ctx: CommandContext) => Promise<void> } | undefined;
 	const appendEntry = vi.fn();
 	const forbidden = () => {
-		throw new Error("scheduling API called");
+		throw new Error("scheduling operation called");
 	};
 	const pi = {
-		on: vi.fn((name: string, handler: (event: any, ctx: any) => any) => {
+		on: vi.fn((name: string, handler: TestHandler) => {
 			const registered = handlers.get(name) ?? [];
 			registered.push(handler);
 			handlers.set(name, registered);
@@ -80,9 +109,25 @@ function createFakeExtension(complete = vi.fn()) {
 	return { handlers, getCommand: () => command, appendEntry };
 }
 
+function projectionResult(value: unknown) {
+	if (!value || typeof value !== "object" || !("projection" in value)) {
+		throw new Error("expected projection result");
+	}
+	return value as {
+		projection: {
+			type: string;
+			version: number;
+			customType: string;
+			summary: string;
+			details: typeof canonicalCheckpoint;
+			usage: typeof usage;
+		};
+	};
+}
+
 function context(branch: unknown[] = []) {
 	return {
-		model: { provider: "test", id: "test-model" },
+		model: { id: "test-model" },
 		modelRegistry: { getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: undefined }) },
 		sessionManager: { getBranch: () => branch },
 		abort: () => {
@@ -195,73 +240,104 @@ describe("canonical checkpoint", () => {
 });
 
 describe("branch fold", () => {
-	it("unlock restores generated value for an override created before the checkpoint", () => {
+	it("reads historical compaction details and keeps controls independent across it", () => {
 		const checkpoint = createCheckpoint(generated, { task: "User task" }, metadata);
 		const state = foldBranch([
 			setControl("task", "User task"),
 			entry("compaction", { details: checkpoint }),
-			unlockControl("task"),
-		]);
-
-		expect(state.overrides).toEqual({});
-		expect(state.checkpoint?.generated.task).toBe("Ship the standalone package");
-		expect(state.checkpoint?.effective.task).toBe("Ship the standalone package");
-	});
-
-	it("unlock restores generated value for an override created after the checkpoint", () => {
-		const state = foldBranch([
-			entry("compaction", { details: canonicalCheckpoint }),
-			setControl("task", "User task"),
-			unlockControl("task"),
-		]);
-
-		expect(state.overrides).toEqual({});
-		expect(state.checkpoint?.effective.task).toBe("Ship the standalone package");
-	});
-
-	it("controls override the latest checkpoint regardless of position", () => {
-		const state = foldBranch([
-			setControl("task", "User task"),
-			entry("compaction", { details: canonicalCheckpoint }),
 			setControl("status", "blocked"),
+			unlockControl("task"),
 		]);
 
-		expect(state.overrides).toEqual({ task: "User task", status: "blocked" });
-		expect(state.checkpoint?.generated).toEqual(generated);
-		expect(state.checkpoint?.effective).toMatchObject({ task: "User task", status: "blocked" });
+		expect(state.overrides).toEqual({ status: "blocked" });
+		expect(state.checkpoint?.effective).toMatchObject({ task: "Ship the standalone package", status: "blocked" });
 	});
 
-	it("uses only entries supplied by the active branch", () => {
-		foldBranch([entry("compaction", { details: canonicalCheckpoint })]);
-		expect(foldBranch([setControl("task", "Active branch")])).toEqual({
-			overrides: { task: "Active branch" },
-		});
-	});
+	it.each(["text", "checkpoint"] as const)(
+		"installs a valid continuity projection from a new %s boundary",
+		(kind) => {
+			const state = foldBranch([
+				setControl("task", "Before boundary"),
+				boundary([continuityProjection()], kind),
+				setControl("status", "blocked"),
+			]);
 
-	it("a later native compaction clears the checkpoint but preserves controls", () => {
+			expect(state.overrides).toEqual({ task: "Before boundary", status: "blocked" });
+			expect(state.checkpoint?.effective).toMatchObject({ task: "Before boundary", status: "blocked" });
+		},
+	);
+
+	it.each(["text", "checkpoint"] as const)(
+		"a later %s boundary without a continuity projection clears the checkpoint but preserves controls",
+		(kind) => {
+			expect(
+				foldBranch([
+					setControl("task", "User task"),
+					entry("compaction", { details: canonicalCheckpoint }),
+					boundary([], kind),
+					setControl("status", "blocked"),
+				]),
+			).toEqual({ overrides: { task: "User task", status: "blocked" } });
+		},
+	);
+
+	it("newest successful boundary wins independent of kind", () => {
+		const later = createCheckpoint(
+			{ ...generated, task: "Later task" },
+			{},
+			{ ...metadata, checkpointId: "checkpoint-2", createdAt: "2026-07-24T10:00:00.000Z" },
+		);
 		const state = foldBranch([
-			setControl("task", "User task"),
 			entry("compaction", { details: canonicalCheckpoint }),
-			entry("compaction", { details: { native: true } }),
+			boundary([continuityProjection(later)], "checkpoint"),
+			boundary([], "text"),
+			setControl("task", "User task"),
 		]);
 
 		expect(state).toEqual({ overrides: { task: "User task" } });
 	});
 
-	it("a later valid continuity compaction becomes current", () => {
-		const later = createCheckpoint(
-			{ ...generated, task: "Later task" },
-			{},
-			{ ...metadata, checkpointId: "checkpoint-2", createdAt: "2026-07-24T10:00:00.000Z", reason: "threshold" },
-		);
+	it("a malformed continuity projection clears the prior checkpoint without throwing", () => {
+		expect(() =>
+			foldBranch([
+				entry("compaction", { details: canonicalCheckpoint }),
+				boundary([continuityProjection({ ...canonicalCheckpoint, extra: true })]),
+				setControl("task", "Still applied"),
+			]),
+		).not.toThrow();
+		expect(
+			foldBranch([
+				entry("compaction", { details: canonicalCheckpoint }),
+				boundary([continuityProjection({ ...canonicalCheckpoint, extra: true })]),
+				setControl("task", "Still applied"),
+			]),
+		).toEqual({ overrides: { task: "Still applied" } });
+	});
+
+	it("ignores unrelated and malformed contributions at their boundary", () => {
+		const malformedBoundary = entry("compaction_boundary", {
+			boundary: {
+				projections: [null, { ...continuityProjection(), type: "wrong" }, { ...continuityProjection(), customType: "other" }],
+			},
+		});
+		expect(foldBranch([entry("compaction", { details: canonicalCheckpoint }), malformedBoundary])).toEqual({
+			overrides: {},
+		});
+	});
+
+	it("installs the valid continuity contribution when unrelated contributions precede it", () => {
 		const state = foldBranch([
-			entry("compaction", { details: canonicalCheckpoint }),
-			entry("compaction", { details: { native: true } }),
-			entry("compaction", { details: later }),
+			boundary([{ ...continuityProjection(), customType: "other" }, continuityProjection()]),
 		]);
 
-		expect(state.checkpoint?.checkpointId).toBe("checkpoint-2");
-		expect(state.checkpoint?.effective.task).toBe("Later task");
+		expect(state.checkpoint?.checkpointId).toBe("checkpoint-1");
+	});
+
+	it("uses only entries supplied by the current branch", () => {
+		foldBranch([boundary([continuityProjection()])]);
+		expect(foldBranch([setControl("task", "Current branch")])).toEqual({
+			overrides: { task: "Current branch" },
+		});
 	});
 });
 
@@ -301,8 +377,8 @@ describe("extension registration", () => {
 		});
 		const fake = createFakeExtension(complete);
 		const before = fake.handlers.get("session_before_compact")?.[0];
-		const result = await before?.(beforeCompactEvent(), context());
-		const checkpoint = result.compaction.details;
+		const result = projectionResult(await before?.(beforeCompactEvent(), context()));
+		const checkpoint = result.projection.details;
 		const notifyBefore = vi.fn();
 
 		await fake.getCommand()?.handler("status", { ui: { notify: notifyBefore } });
@@ -311,7 +387,7 @@ describe("extension registration", () => {
 		const compact = fake.handlers.get("session_compact")?.[0];
 		await compact?.(
 			{ type: "session_compact" },
-			context([entry("compaction", { details: checkpoint })]),
+			context([boundary([continuityProjection(checkpoint)])]),
 		);
 		const notifyAfter = vi.fn();
 		await fake.getCommand()?.handler("status", { ui: { notify: notifyAfter } });
@@ -328,15 +404,30 @@ describe("extension registration", () => {
 		const event = beforeCompactEvent();
 		const before = fake.handlers.get("session_before_compact")?.[0];
 
-		const result = await before?.(event, context());
+		const result = projectionResult(await before?.(event, context()));
 
-		expect(result.compaction.details.generated).toEqual(generated);
+		expect(result).toEqual({
+			projection: {
+				type: "portable_compaction_projection",
+				version: 1,
+				customType: "pi-continuity/checkpoint/v1",
+				summary: renderSummary(result.projection.details),
+				details: result.projection.details,
+				usage,
+			},
+		});
+		expect(result).not.toHaveProperty("compaction");
+		expect(result.projection.details).toMatchObject({
+			generated,
+			provenance: { reason: "manual", willRetry: false },
+			authorization: { mayStartTurn: false },
+		});
 		expect(complete).toHaveBeenCalledOnce();
 		expect(complete.mock.calls[0]?.[2]).toMatchObject({ apiKey: undefined, signal: event.signal });
 	});
 
 	it("returns undefined on synthesis failure and never calls scheduling APIs", async () => {
-		const fake = createFakeExtension(vi.fn().mockRejectedValue(new Error("provider failed")));
+		const fake = createFakeExtension(vi.fn().mockRejectedValue(new Error("synthesis failed")));
 		const before = fake.handlers.get("session_before_compact")?.[0];
 
 		await expect(before?.(beforeCompactEvent(), context())).resolves.toBeUndefined();

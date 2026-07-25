@@ -1,14 +1,17 @@
 import { type Usage, uuidv7 } from "@earendil-works/pi-ai";
 import { complete } from "@earendil-works/pi-ai/compat";
 import type {
+	CompactionBoundaryEntry,
 	ExtensionAPI,
 	ExtensionContext,
+	PortableCompactionProjection,
 	SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 
 export const CONTROL_TYPE = "continuity-control/v1";
 export const CHECKPOINT_SCHEMA = "pi.continuity.checkpoint";
+const PROJECTION_TYPE = "pi-continuity/checkpoint/v1";
 export const CONTROL_SCHEMA = "pi.continuity.control";
 const VERSION = 1;
 const MAX_TEXT = 2000;
@@ -83,6 +86,7 @@ interface BranchEntry {
 	customType?: string;
 	data?: unknown;
 	details?: unknown;
+	boundary?: Pick<CompactionBoundaryEntry["boundary"], "projections">;
 }
 
 export interface CheckpointMetadata {
@@ -340,12 +344,34 @@ export function applyOverrides(
 	};
 }
 
+function checkpointFromBoundary(branchEntry: BranchEntry): ContinuityCheckpointV1 | undefined {
+	const projections = branchEntry.boundary?.projections;
+	if (!Array.isArray(projections)) return undefined;
+	for (const projection of projections) {
+		if (
+			isRecord(projection) &&
+			projection.type === "portable_compaction_projection" &&
+			projection.version === 1 &&
+			projection.customType === PROJECTION_TYPE &&
+			typeof projection.summary === "string" &&
+			projection.summary.trim().length > 0
+		) {
+			return parseCheckpoint(projection.details);
+		}
+	}
+	return undefined;
+}
+
 export function foldBranch(entries: readonly BranchEntry[]): FoldedState {
 	const overrides: Overrides = {};
 	let checkpoint: ContinuityCheckpointV1 | undefined;
 	for (const branchEntry of entries) {
 		if (branchEntry.type === "compaction") {
 			checkpoint = parseCheckpoint(branchEntry.details);
+			continue;
+		}
+		if (branchEntry.type === "compaction_boundary") {
+			checkpoint = checkpointFromBoundary(branchEntry);
 			continue;
 		}
 		if (branchEntry.type === "custom" && branchEntry.customType === CONTROL_TYPE) {
@@ -568,15 +594,15 @@ export function createContinuityExtension(dependencies: ContinuityDependencies) 
 				reason: event.reason,
 				willRetry: event.willRetry,
 			});
-			return {
-				compaction: {
-					summary: renderSummary(checkpoint),
-					firstKeptEntryId: event.preparation.firstKeptEntryId,
-					tokensBefore: event.preparation.tokensBefore,
-					usage: synthesis.usage,
-					details: checkpoint,
-				},
+			const projection: PortableCompactionProjection<ContinuityCheckpointV1> = {
+				type: "portable_compaction_projection",
+				version: 1,
+				customType: PROJECTION_TYPE,
+				summary: renderSummary(checkpoint),
+				details: checkpoint,
+				usage: synthesis.usage,
 			};
+			return { projection };
 		});
 
 		pi.registerCommand("continuity", {

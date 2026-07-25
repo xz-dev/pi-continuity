@@ -1,13 +1,29 @@
 {
   "compilerOptions": {
-    "target": "ES2023",
+    "target": "ES2024",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "baseUrl": ".",
+    "paths": {
+      "@earendil-works/pi-coding-agent": ["../../pi-worktrees/provider-transparent-compaction/packages/coding-agent/src/index.ts"],
+      "@earendil-works/pi-ai": ["../../pi-worktrees/provider-transparent-compaction/packages/ai/src/index.ts"],
+      "@earendil-works/pi-ai/compat": ["../../pi-worktrees/provider-transparent-compaction/packages/ai/src/compat.ts"],
+      "@earendil-works/pi-ai/*": ["../../pi-worktrees/provider-transparent-compaction/packages/ai/src/*.ts", "../../pi-worktrees/provider-transparent-compaction/packages/ai/src/providers/*.ts"],
+      "@earendil-works/pi-agent-core": ["../../pi-worktrees/provider-transparent-compaction/packages/agent/src/index.ts"],
+      "@earendil-works/pi-agent-core/*": ["../../pi-worktrees/provider-transparent-compaction/packages/agent/src/*"],
+      "@earendil-works/pi-tui": ["../../pi-worktrees/provider-transparent-compaction/packages/tui/src/index.ts"],
+      "@earendil-works/pi-tui/*": ["../../pi-worktrees/provider-transparent-compaction/packages/tui/src/*"]
+    },
     "types": ["node", "vitest/globals"]
   },
-  "include": ["extensions/**/*.ts", "tests/**/*.ts"]
+  "include": [
+    "extensions/**/*.ts",
+    "tests/**/*.ts",
+    "../../pi-worktrees/provider-transparent-compaction/packages/coding-agent/src/**/*.d.ts"
+  ]
 }
