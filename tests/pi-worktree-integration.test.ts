@@ -18,9 +18,9 @@ import {
 	type CompactionBoundary,
 	type CompactionBoundaryEntry,
 	type InlineExtension,
+	type InternalSessionEntry,
 	type PortableCompactionProjection,
 	type PublicSessionEntry,
-	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { AuthStorage } from "@earendil-works/pi-coding-agent/core/auth-storage";
 import { convertToLlm } from "@earendil-works/pi-coding-agent/core/messages";
@@ -258,9 +258,9 @@ function publicBranch(manager: SessionManager): PublicSessionEntry[] {
 function checkpointId(entries: readonly PublicSessionEntry[]): string | undefined {
 	return foldBranch(entries).checkpoint?.checkpointId;
 }
-type SessionBoundaryEntry = Extract<SessionEntry, { type: "compaction_boundary" }>;
-function boundaries(manager: Pick<SessionManager, "getEntries">): SessionBoundaryEntry[] {
-	return manager.getEntries().filter((entry): entry is SessionBoundaryEntry => entry.type === "compaction_boundary");
+type StoredBoundaryEntry = Extract<InternalSessionEntry, { type: "compaction_boundary" }>;
+function boundaries(manager: Pick<SessionManager, "getEntries">): StoredBoundaryEntry[] {
+	return manager.getEntries().filter((entry): entry is StoredBoundaryEntry => entry.type === "compaction_boundary");
 }
 function controlTask(entries: readonly PublicSessionEntry[]): string | undefined {
 	return foldBranch(entries).overrides.task;
@@ -741,6 +741,73 @@ describe("Pi worktree + pi-continuity real compaction lifecycle", () => {
 		expect(local.requests.map((record) => record.path)).toEqual(["/v1/responses", "/v1/responses/compact", "/v1/responses"]);
 		expect(timeline).toEqual(["inference", "before", "primary", "boundary", "session_compact", "compaction_end", "inference", "retry"]);
 		expect(statuses).toEqual([undefined]);
+	});
+
+	it("rejects a delayed overflow boundary after a real append without retrying inference", async () => {
+		const setup = await localResponses();
+		servers.push(setup);
+		const timeline: string[] = [];
+		const statuses: Array<string | undefined> = [];
+		const harness = await createHarness({
+			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
+			extensionFactories: [continuityFactory(timeline, statuses), observer(timeline, [])],
+		});
+		harnesses.push(harness);
+		seed(harness, nativeModel(harness, setup.baseUrl));
+		await harness.session.prompt("/continuity task Locked task");
+		await harness.session.compact();
+		const priorBoundary = structuredClone(boundaries(harness.sessionManager)[0]);
+		const priorCheckpoint = checkpointId(publicBranch(harness.sessionManager));
+		const priorControl = controlTask(publicBranch(harness.sessionManager));
+
+		const delayed = await localResponses({
+			overflowFirst: true,
+			delayCompact: true,
+			onRequest: (record) => {
+				if (record.path.endsWith("/responses/compact")) timeline.push("delayed-primary");
+			},
+		});
+		servers.push(delayed);
+		await harness.session.setModel(nativeModel(harness, delayed.baseUrl));
+		timeline.length = 0;
+		statuses.length = 0;
+		const successfulEndsBefore = harness.eventsOfType("compaction_end").filter((event) => event.result !== undefined).length;
+		const pending = harness.session.prompt("overflow stale-boundary prompt");
+		await Promise.race([
+			delayed.waitForCompact(),
+			pending.then(() => Promise.reject(new Error("Overflow recovery completed before compact transport was reached"))),
+		]);
+		const beforeMutation = harness.sessionManager.captureCompactionBoundaryAppendState();
+		const appendedId = harness.sessionManager.appendCustomEntry("joint.expected-state-mutation", {
+			reason: "intervening public append",
+		});
+		const changed = harness.sessionManager.captureCompactionBoundaryAppendState();
+		expect(changed).toMatchObject({
+			sessionId: beforeMutation.sessionId,
+			generation: beforeMutation.generation,
+			version: beforeMutation.version + 1,
+			branch: appendedId,
+		});
+		expect(beforeMutation.branch).not.toBe(changed.branch);
+		delayed.releaseCompact();
+		await pending;
+
+		expect(delayed.requests.map((record) => record.path)).toEqual(["/v1/responses", "/v1/responses/compact"]);
+		expect(inferenceRequestCount(delayed.requests)).toBe(1);
+		expect(timeline).toEqual(["inference", "before", "delayed-primary"]);
+		expect(statuses).toEqual(["joint-checkpoint"]);
+		const failedEnd = harness.eventsOfType("compaction_end").at(-1);
+		expect(failedEnd).toMatchObject({
+			reason: "overflow",
+			result: undefined,
+			aborted: false,
+			willRetry: false,
+		});
+		expect(failedEnd?.errorMessage).toContain("Compaction boundary version changed before append");
+		expect(harness.eventsOfType("compaction_end").filter((event) => event.result !== undefined)).toHaveLength(successfulEndsBefore);
+		expect(boundaries(harness.sessionManager)).toEqual([priorBoundary]);
+		expect(checkpointId(publicBranch(harness.sessionManager))).toBe(priorCheckpoint);
+		expect(controlTask(publicBranch(harness.sessionManager))).toBe(priorControl);
 	});
 
 	it.each([false, true])("preserves prior state when one primary attempt fails (overflow=%s)", async (overflow) => {
