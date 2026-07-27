@@ -35,7 +35,9 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "vitest --run"
+    "test": "vitest --run",
+    "test:e2e:xz-dev-pi": "node scripts/e2e-xz-dev-pi.mjs",
+    "test:e2e:upstream-pi": "node scripts/e2e-earendil-works-pi.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.82.0",

@@ -14,8 +14,45 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.19.0
           cache: npm
       - run: npm ci
       - run: npm run check
       - run: npm test
+
+  host-e2e:
+    name: Host E2E (${{ matrix.host }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: xz-dev/pi
+            source: https://github.com/xz-dev/pi.git
+            script: test:e2e:xz-dev-pi
+          - host: earendil-works/pi
+            source: https://github.com/earendil-works/pi.git
+            script: test:e2e:upstream-pi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Resolve exact host SHA
+        id: host
+        env:
+          E2E_HOST_SOURCE: ${{ matrix.source }}
+        run: |
+          sha="$(git ls-remote --refs "$E2E_HOST_SOURCE" refs/heads/main | awk 'NR == 1 { print $1 }')"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Could not resolve exact host SHA" >&2; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pi-continuity-e2e/hosts
+          key: pi-continuity-e2e-${{ runner.os }}-${{ runner.arch }}-node22-recipe2-${{ matrix.host }}-${{ steps.host.outputs.sha }}
+      - run: npm ci
+      - run: npm run ${{ matrix.script }}
+        env:
+          E2E_HOST_SHA: ${{ steps.host.outputs.sha }}
+          E2E_HOST_CACHE_RECIPE: "2"
