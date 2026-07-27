@@ -24,6 +24,7 @@
   },
   "files": [
     "extensions",
+    "internal",
     "README.md",
     "LICENSE"
   ],
@@ -34,12 +35,11 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "vitest --run --exclude tests/pi-worktree-integration.test.ts",
-    "test:pi-worktree": "node scripts/test-pi-worktree.mjs"
+    "test": "vitest --run"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-ai": ">=0.82.0",
+    "@earendil-works/pi-coding-agent": ">=0.82.0"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.82.0",

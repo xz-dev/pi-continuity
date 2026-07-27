@@ -1,18 +1,12 @@
 # pi-continuity
 
-`pi-continuity` gives [Pi](https://github.com/earendil-works/pi) a small, branch-aware continuity checkpoint at compaction time. During Pi's provider-neutral `session_before_compact` lifecycle, the extension contributes an additive portable projection with custom type `pi-continuity/checkpoint/v1`. It asks the current model to extract the task, completion condition, constraints, established facts, open work, and next actions, then supplies strict checkpoint details and a deterministic Markdown summary for Pi to store on the generic compaction boundary.
+`pi-continuity` gives [Pi](https://github.com/earendil-works/pi) a small, branch-aware continuity checkpoint at compaction time. During Pi's public `session_before_compact` lifecycle, the extension asks the current model to extract the task, completion condition, constraints, established facts, open work, and next actions. On success it returns Pi's standard `{ compaction }` result with strict checkpoint details and a deterministic Markdown summary.
 
-The projection is context for the next genuine user turn. Its authorization explicitly guarantees `authorization.mayStartTurn: false`.
+The summary provides context for Pi's next model request, whether that is an overflow retry or a later user turn. The checkpoint details record `authorization.mayStartTurn: false` as extension-owned metadata; Pi does not interpret or enforce that field.
 
 ## Compatibility
 
-Version 0.2.0 requires Node.js 22.19.0 or newer and a Pi worktree whose `HEAD` descends from exact implementation commit `0f979e9eef5a160fcae3c07cd14591d8ab15f70c`. Downstream builds must preserve that commit object in Git ancestry; an equivalent cherry-picked patch without that commit object is not accepted. No published Pi version contains that lifecycle yet.
-
-The normal checks use the packaged Pi types. `npm run test:pi-worktree` additionally performs a strict, source-aliased typecheck and exercises the actual Pi lifecycle against a compatible Pi Git worktree. Set the absolute `PI_REPO` path to select that worktree:
-
-```sh
-PI_REPO=/path/to/pi-worktree npm run test:pi-worktree
-```
+Version 0.2.0 requires Node.js 22.19.0 or newer and Pi 0.82.0 or newer.
 
 ## Install
 
@@ -48,27 +42,25 @@ Run `/continuity` or `/continuity status` to inspect the current branch state.
 
 ## Status and controls
 
-Controls are append-only session entries and apply only to the current branch. A set control remains authoritative across later checkpoints until it is unlocked or cleared. `clear` clears controls; it does not delete session history. Status reports the currently committed checkpoint with those controls applied, or reports that no valid checkpoint is installed.
+Controls are append-only session entries and apply only to the current branch. A set control remains authoritative across later checkpoints until it is unlocked or cleared. `clear` clears controls; it does not delete session history. Status reports the currently committed checkpoint with those controls applied, or reports that no valid checkpoint is present.
 
 ## Compaction behavior
 
-The same additive projection hook covers every Pi compaction reason:
+The same upstream hook covers every Pi compaction reason:
 
-- **Manual:** `/compact` may include a continuity projection.
-- **Threshold:** automatic threshold compaction may include the same projection; Pi owns turn scheduling.
-- **Overflow:** overflow recovery may include the same projection; Pi owns overflow retry and preserves its `willRetry` behavior.
+- **Manual:** `/compact` may use the continuity compaction result.
+- **Threshold:** automatic threshold compaction may use the same result; Pi owns turn scheduling.
+- **Overflow:** overflow recovery may use the same result; Pi owns retry and preserves its `willRetry` behavior.
 
-The extension does not choose whether the primary compaction is provider-native checkpoint or text, and does not inspect the provider, API, model, or opaque native checkpoint. It does not start or queue turns, invoke compaction, abort work, or own overflow retry. A missing model or authentication, cancellation, model failure, or invalid extraction simply contributes no projection and leaves Pi's primary compaction behavior unchanged.
+The extension returns a complete standard `CompactionResult`: deterministic summary, Pi-provided cut point and token count, synthesis usage, and the strict continuity checkpoint in `details`.
 
-Extension state changes only after Pi has committed the generic boundary and emitted `session_compact`. Failure, cancellation, or boundary append rejection leaves the prior checkpoint and controls unchanged.
+The extension does not start or queue turns, invoke compaction, abort work, or own retry. A missing model or authentication, cancellation, model failure, or invalid extraction returns `undefined`, leaving Pi to continue its own compaction behavior.
 
-Each committed generic compaction boundary supersedes the prior continuity checkpoint. A valid matching `pi-continuity/checkpoint/v1` projection is installed; a later boundary with no matching projection or with malformed matching details clears the checkpoint while preserving branch-local controls. For sessions created before generic boundaries, legacy `compaction.details` remains readable alongside the new format. Session start, tree navigation, and committed compaction rebuild the view from Pi's current branch.
+Checkpoint state changes after Pi commits the result and emits `session_compact`. Failure or cancellation leaves the prior checkpoint and controls unchanged. Each committed compaction supersedes the prior checkpoint; a later compaction with missing or malformed checkpoint details clears it while preserving branch-local controls. Session start, tree navigation, and `session_compact` rebuild the view from Pi's current branch.
 
-## Design and non-goals
+## Design
 
-Canonical checkpoint details are versioned and strict. They retain both the model-generated baseline and the effective projection after user controls, so unlocking a field restores the generated value. Continuity creates the checkpoint identity, timestamp, compaction metadata, and `authorization.mayStartTurn: false` from Pi lifecycle provenance; the model supplies only bounded task-state fields. The Markdown summary is derived deterministically from the effective projection. User controls are custom entries that do not enter LLM context.
-
-This package supplies one provider-neutral additive projection. It does not replace or reinterpret Pi's primary compaction, implement Oh My Pi `preserveData` semantics, or manage provider-native remote compaction. It does not trigger messages, schedule timers, or maintain a filesystem ledger.
+Canonical checkpoint details are versioned and strict. They retain both the model-extracted state and the effective result after user controls, so unlocking a field restores the model-extracted value. Continuity creates the checkpoint identity, timestamp, compaction metadata, and `authorization.mayStartTurn: false`; the model supplies only bounded task-state fields. The Markdown summary is derived deterministically from the effective result. User controls are custom entries that do not enter LLM context.
 
 ## Security
 

@@ -1,21 +1,24 @@
-import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
-	CHECKPOINT_SCHEMA,
 	CONTROL_SCHEMA,
 	CONTROL_TYPE,
+	applyControl,
+	applyOverrides,
 	createCheckpoint,
 	createContinuityExtension,
 	foldBranch,
 	parseCheckpoint,
+	parseCommand,
 	parseControl,
-	parseModelCheckpoint,
+	parseModelExtractedState,
 	renderSummary,
 	type ContinuityCheckpointV1,
-} from "../extensions/continuity.js";
+	type ContinuityControl,
+	type Overrides,
+} from "../internal/continuity-core.js";
 
-const generated = {
+const modelExtracted = {
 	task: "Ship the standalone package",
 	doneWhen: "All verification commands pass",
 	forbid: ["Do not push"],
@@ -32,34 +35,19 @@ const metadata = {
 	willRetry: false,
 };
 
-const canonicalCheckpoint = createCheckpoint(generated, {}, metadata);
+const canonicalCheckpoint = createCheckpoint(modelExtracted, {}, metadata);
+
+const usage = {
+	input: 1,
+	output: 1,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 2,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
 
 function entry(type: string, fields: Record<string, unknown> = {}) {
 	return { type, ...fields };
-}
-
-function boundary(projections: unknown[] = [], kind: "text" | "checkpoint" = "text") {
-	return entry("compaction_boundary", {
-		boundary: {
-			id: `boundary-${kind}`,
-			parentId: null,
-			timestamp: "2026-07-24T09:00:00.000Z",
-			version: 1,
-			kind,
-			tokensBefore: 123,
-			projections,
-		},
-	});
-}
-
-function continuityProjection(details: unknown = canonicalCheckpoint) {
-	return {
-		type: "portable_compaction_projection",
-		version: 1,
-		customType: "pi-continuity/checkpoint/v1",
-		summary: "Portable continuity summary",
-		details,
-	};
 }
 
 function setControl(field: "task" | "doneWhen" | "forbid" | "status", value: string | string[]) {
@@ -76,15 +64,49 @@ function unlockControl(field: "task" | "doneWhen" | "forbid" | "status" | "all")
 	});
 }
 
-function createFakeExtension(complete = vi.fn()) {
-	type TestHandler = (event: unknown, ctx: unknown) => Promise<unknown>;
+function context(branch: unknown[] = []) {
+	return {
+		model: { id: "test-model" },
+		modelRegistry: { getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: undefined }) },
+		sessionManager: { getBranch: () => branch },
+		abort: () => {
+			throw new Error("abort called");
+		},
+		compact: () => {
+			throw new Error("compact called");
+		},
+	};
+}
+
+function beforeCompactEvent(branchEntries: unknown[] = [], signal = new AbortController().signal) {
+	return {
+		type: "session_before_compact",
+		branchEntries,
+		reason: "manual",
+		willRetry: false,
+		signal,
+		preparation: {
+			messagesToSummarize: [],
+			turnPrefixMessages: [],
+			previousSummary: undefined,
+			firstKeptEntryId: "entry-1",
+			tokensBefore: 123,
+		},
+	};
+}
+
+function createFakeExtension(
+	complete = vi.fn(),
+	appendEntry = vi.fn(),
+	newCheckpointId: () => string = () => "checkpoint-test",
+) {
+	type TestHandler = (event: unknown, ctx: unknown) => Promise<unknown> | unknown;
 	type CommandContext = {
 		ui: { notify: (message: string, level: string) => void };
 		appendEntry?: () => never;
 	};
 	const handlers = new Map<string, TestHandler[]>();
 	let command: { handler: (args: string, ctx: CommandContext) => Promise<void> } | undefined;
-	const appendEntry = vi.fn();
 	const forbidden = () => {
 		throw new Error("scheduling operation called");
 	};
@@ -104,181 +126,211 @@ function createFakeExtension(complete = vi.fn()) {
 
 	createContinuityExtension({
 		complete: complete as never,
-		newCheckpointId: () => "checkpoint-test",
+		newCheckpointId,
 		now: () => new Date("2026-07-24T09:00:00.000Z"),
 	})(pi as unknown as ExtensionAPI);
 
 	return { handlers, getCommand: () => command, appendEntry };
 }
 
-interface ProjectionResult {
-	projection: {
-		type: "portable_compaction_projection";
-		version: 1;
-		customType: "pi-continuity/checkpoint/v1";
-		summary: string;
-		details: ContinuityCheckpointV1;
-		usage: Usage;
-	};
+function successfulComplete(model = modelExtracted) {
+	return vi.fn().mockResolvedValue({
+		content: [{ type: "text", text: JSON.stringify(model) }],
+		stopReason: "stop",
+		usage,
+	});
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
+function expectedCheckpoint(overrides: Overrides = {}): ContinuityCheckpointV1 {
+	return createCheckpoint(modelExtracted, overrides, {
+		...metadata,
+		checkpointId: "checkpoint-test",
+	});
 }
-
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-	const actual = Object.keys(value).sort();
-	const expected = [...keys].sort();
-	return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
-function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-	return Object.keys(value).every((key) => keys.includes(key));
-}
-
-function hasFiniteNumberFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
-	return fields.every((field) => typeof value[field] === "number" && Number.isFinite(value[field]));
-}
-
-function hasAbsentOrFiniteNumber(value: Record<string, unknown>, field: string): boolean {
-	return !(field in value) || (typeof value[field] === "number" && Number.isFinite(value[field]));
-}
-
-function isUsage(value: unknown): value is Usage {
-	if (
-		!isRecord(value) ||
-		!hasOnlyKeys(value, [
-			"input",
-			"output",
-			"cacheRead",
-			"cacheWrite",
-			"cacheWrite1h",
-			"reasoning",
-			"totalTokens",
-			"cost",
-		]) ||
-		!hasFiniteNumberFields(value, ["input", "output", "cacheRead", "cacheWrite", "totalTokens"]) ||
-		!hasAbsentOrFiniteNumber(value, "cacheWrite1h") ||
-		!hasAbsentOrFiniteNumber(value, "reasoning") ||
-		!isRecord(value.cost)
-	) {
-		return false;
-	}
-	return (
-		hasExactKeys(value.cost, ["input", "output", "cacheRead", "cacheWrite", "total"]) &&
-		hasFiniteNumberFields(value.cost, ["input", "output", "cacheRead", "cacheWrite", "total"])
-	);
-}
-
-function isProjectionResult(value: unknown): value is ProjectionResult {
-	if (!isRecord(value) || !hasExactKeys(value, ["projection"]) || !isRecord(value.projection)) return false;
-	const projection = value.projection;
-	return (
-		hasExactKeys(projection, ["type", "version", "customType", "summary", "details", "usage"]) &&
-		projection.type === "portable_compaction_projection" &&
-		projection.version === 1 &&
-		projection.customType === "pi-continuity/checkpoint/v1" &&
-		typeof projection.summary === "string" &&
-		projection.summary.length > 0 &&
-		parseCheckpoint(projection.details) !== undefined &&
-		isUsage(projection.usage)
-	);
-}
-
-function projectionResult(value: unknown): ProjectionResult {
-	if (!isProjectionResult(value)) throw new Error("expected complete projection result");
-	return value;
-}
-
-function context(branch: unknown[] = []) {
-	return {
-		model: { id: "test-model" },
-		modelRegistry: { getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: undefined }) },
-		sessionManager: { getBranch: () => branch },
-		abort: () => {
-			throw new Error("abort called");
-		},
-		compact: () => {
-			throw new Error("compact called");
-		},
-	};
-}
-
-function beforeCompactEvent(branchEntries: unknown[] = []) {
-	return {
-		type: "session_before_compact",
-		branchEntries,
-		reason: "manual",
-		willRetry: false,
-		signal: new AbortController().signal,
-		preparation: {
-			messagesToSummarize: [],
-			turnPrefixMessages: [],
-			previousSummary: undefined,
-			firstKeptEntryId: "entry-1",
-			tokensBefore: 123,
-		},
-	};
-}
-
-const usage = {
-	input: 1,
-	output: 1,
-	cacheRead: 0,
-	cacheWrite: 0,
-	totalTokens: 2,
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
 
 describe("strict schemas", () => {
-	it("rejects model output with unknown keys", () => {
-		expect(parseModelCheckpoint(JSON.stringify({ ...generated, extra: true }))).toBeUndefined();
+	it("accepts only the exact bounded model shape", () => {
+		expect(parseModelExtractedState(JSON.stringify(modelExtracted))).toEqual(modelExtracted);
+		expect(parseModelExtractedState(JSON.stringify({ ...modelExtracted, extra: true }))).toBeUndefined();
+		expect(parseModelExtractedState(JSON.stringify({ ...modelExtracted, task: "" }))).toBeUndefined();
+		expect(parseModelExtractedState(JSON.stringify({ ...modelExtracted, forbid: ["same", "same"] }))).toBeUndefined();
+		expect(parseModelExtractedState("not json")).toBeUndefined();
 	});
 
-	it("rejects unknown keys in canonical checkpoint and nested drafts", () => {
+	const serializedModel = JSON.stringify(modelExtracted);
+	it.each([
+		["model output", serializedModel.padEnd(16000, " "), serializedModel.padEnd(16001, " ")],
+		[
+			"scalar",
+			JSON.stringify({ ...modelExtracted, task: "x".repeat(2000) }),
+			JSON.stringify({ ...modelExtracted, task: "x".repeat(2001) }),
+		],
+		[
+			"list item",
+			JSON.stringify({ ...modelExtracted, forbid: ["x".repeat(1000)] }),
+			JSON.stringify({ ...modelExtracted, forbid: ["x".repeat(1001)] }),
+		],
+		[
+			"list count",
+			JSON.stringify({ ...modelExtracted, established: Array.from({ length: 24 }, (_, index) => `fact-${index}`) }),
+			JSON.stringify({ ...modelExtracted, established: Array.from({ length: 25 }, (_, index) => `fact-${index}`) }),
+		],
+	])("accepts the %s limit and rejects one over it", (_name, accepted, rejected) => {
+		expect(parseModelExtractedState(accepted)).toBeDefined();
+		expect(parseModelExtractedState(rejected)).toBeUndefined();
+	});
+
+	it.each([
+		["C0", "\u0020", "\u001f"],
+		["DEL", "\u007e", "\u007f"],
+	])("accepts printable text at the %s boundary and rejects the control character", (_name, accepted, rejected) => {
+		expect(parseModelExtractedState(JSON.stringify({ ...modelExtracted, task: `x${accepted}x` }))).toBeDefined();
+		expect(parseModelExtractedState(JSON.stringify({ ...modelExtracted, task: `x${rejected}x` }))).toBeUndefined();
+	});
+
+	it("accepts only exact canonical checkpoints and ISO timestamps", () => {
+		expect(parseCheckpoint(canonicalCheckpoint)).toEqual(canonicalCheckpoint);
 		expect(parseCheckpoint({ ...canonicalCheckpoint, extra: true })).toBeUndefined();
 		expect(
-			parseCheckpoint({
-				...canonicalCheckpoint,
-				generated: { ...canonicalCheckpoint.generated, extra: true },
-			}),
+			parseCheckpoint({ ...canonicalCheckpoint, modelExtracted: { ...canonicalCheckpoint.modelExtracted, extra: true } }),
+		).toBeUndefined();
+		expect(parseCheckpoint({ ...canonicalCheckpoint, createdAt: "2026-07-24T09:00:00Z" })).toBeUndefined();
+		expect(
+			parseCheckpoint({ ...canonicalCheckpoint, authorization: { mayStartTurn: true } }),
 		).toBeUndefined();
 	});
 
-	it("rejects controls with unknown keys", () => {
-		expect(
-			parseControl({ schema: CONTROL_SCHEMA, version: 1, operation: "clear", extra: true }),
-		).toBeUndefined();
-	});
-
-	it("accepts only canonical ISO createdAt values", () => {
-		expect(parseCheckpoint(canonicalCheckpoint)?.createdAt).toBe("2026-07-24T09:00:00.000Z");
-		expect(
-			parseCheckpoint({ ...canonicalCheckpoint, createdAt: "2026-07-24T09:00:00Z" }),
-		).toBeUndefined();
+	it("accepts only exact control schemas", () => {
+		const control = {
+			schema: CONTROL_SCHEMA,
+			version: 1,
+			operation: "set",
+			field: "task",
+			value: "User task",
+		};
+		expect(parseControl(control)).toEqual(control);
+		expect(parseControl({ ...control, extra: true })).toBeUndefined();
+		expect(parseControl({ schema: CONTROL_SCHEMA, version: 1, operation: "clear", extra: true })).toBeUndefined();
+		expect(parseControl({ schema: CONTROL_SCHEMA, version: 1, operation: "unlock", field: "other" })).toBeUndefined();
 	});
 });
 
-describe("canonical checkpoint", () => {
-	it("preserves generated baseline and host-authors mayStartTurn as false", () => {
-		const checkpoint = createCheckpoint(generated, { task: "User task" }, metadata);
+describe("checkpoint creation and controls", () => {
+	it("preserves modelExtracted values separately from effective overrides", () => {
+		const checkpoint = createCheckpoint(modelExtracted, { task: "User task", status: "blocked" }, metadata);
 
-		expect(checkpoint.generated.task).toBe("Ship the standalone package");
-		expect(checkpoint.effective.task).toBe("User task");
+		expect(checkpoint.modelExtracted).toEqual(modelExtracted);
+		expect(checkpoint.effective).toEqual({ ...modelExtracted, task: "User task", status: "blocked" });
 		expect(checkpoint.authorization).toEqual({ mayStartTurn: false });
-		expect(parseCheckpoint(checkpoint)?.authorization.mayStartTurn).toBe(false);
+		expect(checkpoint.provenance).toEqual({ source: "continuity-model", reason: "manual", willRetry: false });
 	});
 
-	it("renders the effective projection deterministically", () => {
+	it("applies, unlocks, and clears controls without mutating the modelExtracted checkpoint", () => {
+		const overrides: Overrides = {};
+		const controls: ContinuityControl[] = [
+			{ schema: CONTROL_SCHEMA, version: 1, operation: "set", field: "task", value: "Locked task" },
+			{ schema: CONTROL_SCHEMA, version: 1, operation: "set", field: "forbid", value: ["No deploy"] },
+		];
+		for (const control of controls) applyControl(overrides, control);
+		expect(applyOverrides(canonicalCheckpoint, overrides).effective).toMatchObject({
+			task: "Locked task",
+			forbid: ["No deploy"],
+		});
+		expect(canonicalCheckpoint.modelExtracted).toEqual(modelExtracted);
+
+		applyControl(overrides, { schema: CONTROL_SCHEMA, version: 1, operation: "unlock", field: "task" });
+		expect(applyOverrides(canonicalCheckpoint, overrides).effective.task).toBe(modelExtracted.task);
+		applyControl(overrides, { schema: CONTROL_SCHEMA, version: 1, operation: "clear" });
+		expect(overrides).toEqual({});
+	});
+});
+
+describe("branch fold", () => {
+	it("uses only supplied branch entries and the latest committed compaction", () => {
+		const older = createCheckpoint({ ...modelExtracted, task: "Older" }, {}, metadata);
+		const newer = createCheckpoint(
+			{ ...modelExtracted, task: "Newer" },
+			{},
+			{ ...metadata, checkpointId: "checkpoint-2", createdAt: "2026-07-24T10:00:00.000Z" },
+		);
+		const branch = [
+			setControl("task", "Locked task"),
+			entry("compaction", { details: older }),
+			entry("message"),
+			entry("compaction", { details: newer }),
+			setControl("status", "blocked"),
+		];
+
+		expect(foldBranch(branch)).toEqual({
+			checkpoint: expect.objectContaining({
+				checkpointId: "checkpoint-2",
+				effective: expect.objectContaining({ task: "Locked task", status: "blocked" }),
+			}),
+			overrides: { task: "Locked task", status: "blocked" },
+		});
+		expect(foldBranch([setControl("task", "Other branch")])).toEqual({
+			overrides: { task: "Other branch" },
+		});
+	});
+
+	it.each([
+		{ ...canonicalCheckpoint, extra: true },
+		{ ...canonicalCheckpoint, modelExtracted: undefined },
+		{ ...canonicalCheckpoint, effective: 1n },
+		{ ...canonicalCheckpoint, modelExtracted: { ...modelExtracted, next: [1n] } },
+	])("clears the prior checkpoint at malformed compaction details %# while preserving controls", (details) => {
+		expect(
+			foldBranch([
+				entry("compaction", { details: canonicalCheckpoint }),
+				setControl("task", "Keep this control"),
+				entry("compaction", { details }),
+				setControl("status", "blocked"),
+			]),
+		).toEqual({ overrides: { task: "Keep this control", status: "blocked" } });
+	});
+
+	it("clears the prior checkpoint at a checkpoint-free compaction", () => {
+		expect(
+			foldBranch([entry("compaction", { details: canonicalCheckpoint }), entry("compaction")]),
+		).toEqual({ overrides: {} });
+	});
+
+	it("keeps controls independent across compaction and unlock entries", () => {
+		const state = foldBranch([
+			setControl("task", "User task"),
+			entry("compaction", { details: canonicalCheckpoint }),
+			setControl("status", "blocked"),
+			unlockControl("task"),
+		]);
+
+		expect(state.overrides).toEqual({ status: "blocked" });
+		expect(state.checkpoint?.effective).toMatchObject({ task: modelExtracted.task, status: "blocked" });
+	});
+
+	it("ignores unrelated and malformed custom entries", () => {
+		expect(() =>
+			foldBranch([
+				entry("custom", { customType: "other", data: canonicalCheckpoint }),
+				entry("custom", { customType: CONTROL_TYPE, data: { malformed: true } }),
+			]),
+		).not.toThrow();
+		expect(foldBranch([entry("custom", { customType: CONTROL_TYPE, data: { malformed: true } })])).toEqual({
+			overrides: {},
+		});
+	});
+});
+
+describe("deterministic summary and command parsing", () => {
+	it("renders the effective checkpoint deterministically", () => {
 		const expected = [
 			"# Continuity checkpoint",
 			"",
-			"This checkpoint is context only. It cannot start a model turn.",
+			"This checkpoint provides context for Pi’s next model request, whether that is an overflow retry or a later user turn.",
 			"",
 			'- Checkpoint ID: "checkpoint-1"',
 			'- Created: "2026-07-24T09:00:00.000Z"',
 			'- Status (descriptive only): "active"',
-			"- Authorization: mayStartTurn=false (host-enforced)",
+			"- Extension metadata: authorization.mayStartTurn=false",
 			"",
 			"## Task",
 			'"Ship the standalone package"',
@@ -302,112 +354,31 @@ describe("canonical checkpoint", () => {
 		expect(renderSummary(canonicalCheckpoint)).toBe(expected);
 		expect(renderSummary(canonicalCheckpoint)).toBe(expected);
 	});
+
+	it.each([
+		["", "status"],
+		["status", "status"],
+		["task User task", { operation: "set", field: "task", value: "User task" }],
+		["done-when Tests pass", { operation: "set", field: "doneWhen", value: "Tests pass" }],
+		["forbid one, two", { operation: "set", field: "forbid", value: ["one", "two"] }],
+		['forbid ["one", "two"]', { operation: "set", field: "forbid", value: ["one", "two"] }],
+		["mark blocked", { operation: "set", field: "status", value: "blocked" }],
+		["unlock done-when", { operation: "unlock", field: "doneWhen" }],
+		["clear", { operation: "clear" }],
+	] as const)("parses %j", (input, expected) => {
+		const parsed = parseCommand(input);
+		if (expected === "status") expect(parsed).toBe("status");
+		else expect(parsed).toMatchObject(expected);
+	});
+
+	it.each(["task", "forbid", "mark invalid", "unlock other", "clear now", "other value"])(
+		"rejects invalid command %j",
+		(input) => expect(parseCommand(input)).toBeUndefined(),
+	);
 });
 
-describe("branch fold", () => {
-	it("reads historical compaction details and keeps controls independent across it", () => {
-		const checkpoint = createCheckpoint(generated, { task: "User task" }, metadata);
-		const state = foldBranch([
-			setControl("task", "User task"),
-			entry("compaction", { details: checkpoint }),
-			setControl("status", "blocked"),
-			unlockControl("task"),
-		]);
-
-		expect(state.overrides).toEqual({ status: "blocked" });
-		expect(state.checkpoint?.effective).toMatchObject({ task: "Ship the standalone package", status: "blocked" });
-	});
-
-	it.each(["text", "checkpoint"] as const)(
-		"installs a valid continuity projection from a new %s boundary",
-		(kind) => {
-			const state = foldBranch([
-				setControl("task", "Before boundary"),
-				boundary([continuityProjection()], kind),
-				setControl("status", "blocked"),
-			]);
-
-			expect(state.overrides).toEqual({ task: "Before boundary", status: "blocked" });
-			expect(state.checkpoint?.effective).toMatchObject({ task: "Before boundary", status: "blocked" });
-		},
-	);
-
-	it.each(["text", "checkpoint"] as const)(
-		"a later %s boundary without a continuity projection clears the checkpoint but preserves controls",
-		(kind) => {
-			expect(
-				foldBranch([
-					setControl("task", "User task"),
-					entry("compaction", { details: canonicalCheckpoint }),
-					boundary([], kind),
-					setControl("status", "blocked"),
-				]),
-			).toEqual({ overrides: { task: "User task", status: "blocked" } });
-		},
-	);
-
-	it("newest successful boundary wins independent of kind", () => {
-		const later = createCheckpoint(
-			{ ...generated, task: "Later task" },
-			{},
-			{ ...metadata, checkpointId: "checkpoint-2", createdAt: "2026-07-24T10:00:00.000Z" },
-		);
-		const state = foldBranch([
-			entry("compaction", { details: canonicalCheckpoint }),
-			boundary([continuityProjection(later)], "checkpoint"),
-			boundary([], "text"),
-			setControl("task", "User task"),
-		]);
-
-		expect(state).toEqual({ overrides: { task: "User task" } });
-	});
-
-	it("a malformed continuity projection clears the prior checkpoint without throwing", () => {
-		expect(() =>
-			foldBranch([
-				entry("compaction", { details: canonicalCheckpoint }),
-				boundary([continuityProjection({ ...canonicalCheckpoint, extra: true })]),
-				setControl("task", "Still applied"),
-			]),
-		).not.toThrow();
-		expect(
-			foldBranch([
-				entry("compaction", { details: canonicalCheckpoint }),
-				boundary([continuityProjection({ ...canonicalCheckpoint, extra: true })]),
-				setControl("task", "Still applied"),
-			]),
-		).toEqual({ overrides: { task: "Still applied" } });
-	});
-
-	it("ignores unrelated and malformed contributions at their boundary", () => {
-		const malformedBoundary = entry("compaction_boundary", {
-			boundary: {
-				projections: [null, { ...continuityProjection(), type: "wrong" }, { ...continuityProjection(), customType: "other" }],
-			},
-		});
-		expect(foldBranch([entry("compaction", { details: canonicalCheckpoint }), malformedBoundary])).toEqual({
-			overrides: {},
-		});
-	});
-
-	it("installs the valid continuity contribution when unrelated contributions precede it", () => {
-		const state = foldBranch([
-			boundary([{ ...continuityProjection(), customType: "other" }, continuityProjection()]),
-		]);
-
-		expect(state.checkpoint?.checkpointId).toBe("checkpoint-1");
-	});
-
-	it("uses only entries supplied by the current branch", () => {
-		foldBranch([boundary([continuityProjection()])]);
-		expect(foldBranch([setControl("task", "Current branch")])).toEqual({
-			overrides: { task: "Current branch" },
-		});
-	});
-});
-
-describe("extension registration", () => {
-	it("registers rebuild lifecycle handlers, one compaction handler, and pi-owned command persistence", async () => {
+describe("extension contract and lifecycle", () => {
+	it("registers only upstream lifecycle handlers and persists controls through ExtensionAPI", async () => {
 		const fake = createFakeExtension();
 
 		expect([...fake.handlers.keys()].sort()).toEqual([
@@ -424,7 +395,6 @@ describe("extension registration", () => {
 			}),
 			ui: { notify: vi.fn() },
 		});
-
 		expect(fake.appendEntry).toHaveBeenCalledWith(CONTROL_TYPE, {
 			schema: CONTROL_SCHEMA,
 			version: 1,
@@ -434,138 +404,101 @@ describe("extension registration", () => {
 		});
 	});
 
-	it("does not expose a synthesized checkpoint before session_compact rebuilds persisted state", async () => {
-		const complete = vi.fn().mockResolvedValue({
-			content: [{ type: "text", text: JSON.stringify(generated) }],
-			stopReason: "stop",
-			usage,
-		});
-		const fake = createFakeExtension(complete);
-		const before = fake.handlers.get("session_before_compact")?.[0];
-		const result = projectionResult(await before?.(beforeCompactEvent(), context()));
-		const checkpoint = result.projection.details;
-		const notifyBefore = vi.fn();
-
-		await fake.getCommand()?.handler("status", { ui: { notify: notifyBefore } });
-		expect(notifyBefore).toHaveBeenCalledWith(expect.stringContaining("no valid checkpoint yet"), "info");
-
-		const compact = fake.handlers.get("session_compact")?.[0];
-		await compact?.(
-			{ type: "session_compact" },
-			context([boundary([continuityProjection(checkpoint)])]),
-		);
-		const notifyAfter = vi.fn();
-		await fake.getCommand()?.handler("status", { ui: { notify: notifyAfter } });
-		expect(notifyAfter).toHaveBeenCalledWith(expect.stringContaining('"Ship the standalone package"'), "info");
-	});
-
-	it("rejects malformed projection envelopes and details at the test boundary", () => {
-		expect(() => projectionResult({ projection: { type: "portable_compaction_projection" } })).toThrow(
-			"expected complete projection result",
-		);
-		expect(() =>
-			projectionResult({
-				projection: {
-					type: "portable_compaction_projection",
-					version: 1,
-					customType: "pi-continuity/checkpoint/v1",
-					summary: "Malformed details",
-					details: { ...canonicalCheckpoint, authorization: { mayStartTurn: true } },
-					usage,
-				},
-			}),
-		).toThrow("expected complete projection result");
-	});
-
-	it.each([
-		["non-finite optional cacheWrite1h", { ...usage, cacheWrite1h: Number.POSITIVE_INFINITY }],
-		["non-numeric optional reasoning", { ...usage, reasoning: "1" }],
-		["extraneous top-level Usage key", { ...usage, extra: 1 }],
-		["extraneous Usage cost key", { ...usage, cost: { ...usage.cost, extra: 1 } }],
-	])("rejects %s at the test boundary", (_description, malformedUsage) => {
-		expect(() =>
-			projectionResult({
-				projection: {
-					type: "portable_compaction_projection",
-					version: 1,
-					customType: "pi-continuity/checkpoint/v1",
-					summary: "Malformed usage",
-					details: canonicalCheckpoint,
-					usage: malformedUsage,
-				},
-			}),
-		).toThrow("expected complete projection result");
-	});
-
-	it("synthesizes when auth is ok even when apiKey is undefined and passes event.signal", async () => {
-		const complete = vi.fn().mockResolvedValue({
-			content: [{ type: "text", text: JSON.stringify(generated) }],
-			stopReason: "stop",
-			usage,
-		});
+	it("returns standard upstream { compaction } and exposes checkpoint state only after commit", async () => {
+		const complete = successfulComplete();
 		const fake = createFakeExtension(complete);
 		const event = beforeCompactEvent();
 		const before = fake.handlers.get("session_before_compact")?.[0];
-		const expectedCheckpoint: ContinuityCheckpointV1 = {
-			schema: "pi.continuity.checkpoint",
-			version: 1,
-			checkpointId: "checkpoint-test",
-			createdAt: "2026-07-24T09:00:00.000Z",
-			generated: {
-				task: "Ship the standalone package",
-				doneWhen: "All verification commands pass",
-				forbid: ["Do not push"],
-				status: "active",
-				established: ["Pi version is 0.82.0"],
-				open: ["Install smoke"],
-				next: ["Run tests"],
-			},
-			effective: {
-				task: "Ship the standalone package",
-				doneWhen: "All verification commands pass",
-				forbid: ["Do not push"],
-				status: "active",
-				established: ["Pi version is 0.82.0"],
-				open: ["Install smoke"],
-				next: ["Run tests"],
-			},
-			provenance: {
-				source: "continuity-model",
-				reason: "manual",
-				willRetry: false,
-			},
-			authorization: { mayStartTurn: false },
-		};
 
-		const result = projectionResult(await before?.(event, context()));
-
+		const result = await before?.(event, context());
+		const checkpoint = expectedCheckpoint();
 		expect(result).toEqual({
-			projection: {
-				type: "portable_compaction_projection",
-				version: 1,
-				customType: "pi-continuity/checkpoint/v1",
-				summary: renderSummary(expectedCheckpoint),
-				details: expectedCheckpoint,
-				usage: {
-					input: 1,
-					output: 1,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
+			compaction: {
+				summary: renderSummary(checkpoint),
+				firstKeptEntryId: "entry-1",
+				tokensBefore: 123,
+				usage,
+				details: checkpoint,
 			},
 		});
-		expect(result).not.toHaveProperty("compaction");
+
+		const notifyBefore = vi.fn();
+		await fake.getCommand()?.handler("status", { ui: { notify: notifyBefore } });
+		expect(notifyBefore).toHaveBeenCalledWith(expect.stringContaining("no valid checkpoint is present"), "info");
+
+		await fake.handlers.get("session_compact")?.[0]?.(
+			{ type: "session_compact" },
+			context([entry("compaction", { details: checkpoint })]),
+		);
+		const notifyAfter = vi.fn();
+		await fake.getCommand()?.handler("status", { ui: { notify: notifyAfter } });
+		expect(notifyAfter).toHaveBeenCalledWith(expect.stringContaining('## Task\n"Ship the standalone package"'), "info");
 		expect(complete).toHaveBeenCalledOnce();
 		expect(complete.mock.calls[0]?.[2]).toMatchObject({ apiKey: undefined, signal: event.signal });
 	});
 
-	it("returns undefined on synthesis failure and never calls scheduling APIs", async () => {
-		const fake = createFakeExtension(vi.fn().mockRejectedValue(new Error("synthesis failed")));
-		const before = fake.handlers.get("session_before_compact")?.[0];
+	it("folds controls from the event branch into the returned committed checkpoint", async () => {
+		const fake = createFakeExtension(successfulComplete());
+		const branch = [setControl("task", "Locked branch task"), setControl("status", "blocked")];
 
-		await expect(before?.(beforeCompactEvent(), context())).resolves.toBeUndefined();
-		expect(CHECKPOINT_SCHEMA).toBe("pi.continuity.checkpoint");
+		const result = (await fake.handlers.get("session_before_compact")?.[0]?.(
+			beforeCompactEvent(branch),
+			context(branch),
+		)) as { compaction: { summary: string; details: ContinuityCheckpointV1 } };
+
+		expect(result.compaction.details.modelExtracted).toEqual(modelExtracted);
+		expect(result.compaction.details.effective).toMatchObject({ task: "Locked branch task", status: "blocked" });
+		expect(result.compaction.summary).toBe(renderSummary(expectedCheckpoint({ task: "Locked branch task", status: "blocked" })));
+	});
+
+	it.each(["session_start", "session_tree", "session_compact"])(
+		"rebuilds committed branch state on %s",
+		async (lifecycle) => {
+			const fake = createFakeExtension();
+			const checkpoint = createCheckpoint(
+				{ ...modelExtracted, task: `${lifecycle} task` },
+				{},
+				{ ...metadata, checkpointId: lifecycle },
+			);
+			await fake.handlers.get(lifecycle)?.[0]?.({ type: lifecycle }, context([entry("compaction", { details: checkpoint })]));
+			const notify = vi.fn();
+			await fake.getCommand()?.handler("status", { ui: { notify } });
+			expect(notify).toHaveBeenCalledWith(expect.stringContaining(`## Task\n"${lifecycle} task"`), "info");
+		},
+	);
+
+	it("returns undefined on missing model, authentication, abort, model failure, or invalid output", async () => {
+		const cases = [
+			{ fake: createFakeExtension(successfulComplete()), event: beforeCompactEvent(), ctx: { ...context(), model: undefined } },
+			{
+				fake: createFakeExtension(successfulComplete()),
+				event: beforeCompactEvent(),
+				ctx: { ...context(), modelRegistry: { getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: false }) } },
+			},
+			{
+				fake: createFakeExtension(successfulComplete()),
+				event: beforeCompactEvent([], AbortSignal.abort()),
+				ctx: context(),
+			},
+			{ fake: createFakeExtension(vi.fn().mockRejectedValue(new Error("failed"))), event: beforeCompactEvent(), ctx: context() },
+			{
+				fake: createFakeExtension(successfulComplete({ ...modelExtracted, extra: true } as typeof modelExtracted)),
+				event: beforeCompactEvent(),
+				ctx: context(),
+			},
+		];
+
+		for (const testCase of cases) {
+			await expect(
+				testCase.fake.handlers.get("session_before_compact")?.[0]?.(testCase.event, testCase.ctx),
+			).resolves.toBeUndefined();
+		}
+	});
+
+	it("leaves scheduling, compaction invocation, abort, and retry ownership to Pi", async () => {
+		const fake = createFakeExtension(successfulComplete());
+		await expect(
+			fake.handlers.get("session_before_compact")?.[0]?.(beforeCompactEvent(), context()),
+		).resolves.toHaveProperty("compaction");
 	});
 });
