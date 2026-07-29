@@ -1,8 +1,17 @@
 # pi-continuity
 
-`pi-continuity` gives [Pi](https://github.com/earendil-works/pi) a small, branch-aware continuity checkpoint at compaction time. During Pi's public `session_before_compact` lifecycle, the extension asks the current model to extract the task, completion condition, constraints, established facts, open work, and next actions. On success it returns Pi's standard `{ compaction }` result with strict checkpoint details and a deterministic Markdown summary.
+`pi-continuity` gives [Pi](https://github.com/earendil-works/pi) a dedicated continuity summary whenever Pi compacts a session.
 
-The summary provides context for Pi's next model request, whether that is an overflow retry or a later user turn. The checkpoint details record `authorization.mayStartTurn: false` as extension-owned metadata; Pi does not interpret or enforce that field.
+The extension asks the current model to extract only the information needed to resume work:
+
+- the current task;
+- the completion condition;
+- constraints;
+- established facts and decisions;
+- open work;
+- next actions.
+
+It validates the extraction against a strict bounded schema and renders deterministic Markdown for Pi's standard compaction entry.
 
 ## Compatibility
 
@@ -28,39 +37,32 @@ pi update --extensions
 
 ## Usage
 
-Run `/continuity` or `/continuity status` to inspect the current branch state.
+Run:
 
 ```text
-/continuity task <text>
-/continuity done-when <text>
-/continuity forbid <item>, <item>
-/continuity forbid ["item one", "item two"]
-/continuity mark active|blocked|done|unknown
-/continuity unlock task|done-when|forbid|status|all
-/continuity clear
+/continuity
 ```
 
-## Status and controls
+The command immediately requests Pi's manual compaction flow. Pi aborts and settles active work just as it does for its built-in `/compact` command. After the compaction commits successfully, pi-continuity sends one hidden custom message that starts a continuation turn from the new summary.
 
-Controls are append-only session entries and apply only to the current branch. A set control remains authoritative across later checkpoints until it is unlocked or cleared. `clear` clears controls; it does not delete session history. Status reports the currently committed checkpoint with those controls applied, or reports that no valid checkpoint is present.
+A failed or cancelled compaction does not start a continuation. Repeated `/continuity` requests while the same compaction is pending do not start duplicate compactions or turns.
 
-## Compaction behavior
+## Automatic compaction
 
-The same upstream hook covers every Pi compaction reason:
+Pi's native threshold and overflow compaction also use the dedicated continuity summary:
 
-- **Manual:** `/compact` may use the continuity compaction result.
-- **Threshold:** automatic threshold compaction may use the same result; Pi owns turn scheduling.
-- **Overflow:** overflow recovery may use the same result; Pi owns retry and preserves its `willRetry` behavior.
+- **Threshold:** Pi decides when to compact and whether queued work should continue.
+- **Overflow:** Pi preserves its normal compact-and-retry behavior.
 
-The extension returns a complete standard `CompactionResult`: deterministic summary, Pi-provided cut point and token count, synthesis usage, and the strict continuity checkpoint in `details`.
+The extension does not define thresholds, initiate automatic turns, or take ownership of retry and queue scheduling.
 
-The extension does not start or queue turns, invoke compaction, abort work, or own retry. A missing model or authentication, cancellation, model failure, or invalid extraction returns `undefined`, leaving Pi to continue its own compaction behavior.
+Pi's built-in `/compact` remains native. The dedicated manual continuity flow is selected only by `/continuity`; automatic threshold and overflow events use the same summary without adding a plugin-started continuation.
 
-Checkpoint state changes after Pi commits the result and emits `session_compact`. Failure or cancellation leaves the prior checkpoint and controls unchanged. Each committed compaction supersedes the prior checkpoint; a later compaction with missing or malformed checkpoint details clears it while preserving branch-local controls. Session start, tree navigation, and `session_compact` rebuild the view from Pi's current branch.
+## Failure behavior
 
-## Design
+Continuity synthesis is fail-open. If no model or authentication is available, the request is cancelled, the model fails, or its output does not match the schema, the extension returns no replacement result. Pi may then use its native compaction summary.
 
-Canonical checkpoint details are versioned and strict. They retain both the model-extracted state and the effective result after user controls, so unlocking a field restores the model-extracted value. Continuity creates the checkpoint identity, timestamp, compaction metadata, and `authorization.mayStartTurn: false`; the model supplies only bounded task-state fields. The Markdown summary is derived deterministically from the effective result. User controls are custom entries that do not enter LLM context.
+A successful continuity result preserves Pi's cumulative file-operation details: files only read remain under `readFiles`, while written or edited files appear under `modifiedFiles`.
 
 ## Security
 

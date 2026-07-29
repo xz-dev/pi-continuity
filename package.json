@@ -1,7 +1,7 @@
 {
   "name": "pi-continuity",
   "version": "0.2.0",
-  "description": "Branch-aware continuity checkpoints for Pi compaction",
+  "description": "Dedicated continuity summaries for manual and automatic Pi compaction",
   "private": false,
   "type": "module",
   "license": "MIT",
