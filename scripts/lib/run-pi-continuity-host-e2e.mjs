@@ -296,9 +296,8 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			fauxAssistantMessage(
 				JSON.stringify({
 					task: "Verify pi-continuity on both current Pi hosts",
-					doneWhen: "The committed checkpoint is visible through /continuity status",
-					forbid: ["Do not call a paid or network model provider"],
-					status: "active",
+					doneWhen: "The committed continuity summary is visible in the session",
+					constraints: ["Do not call a paid or network model provider"],
 					established: ["The package manifest loaded the continuity extension"],
 					open: [],
 					next: ["Report the exact tested host SHA"],
@@ -307,6 +306,13 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		]);
 
 		const modelRuntime = await ModelRuntime.create({ modelsPath: null, allowModelNetwork: false });
+		modelRuntime.registerProvider(faux.getModel().provider, {
+			name: "Faux",
+			api: faux.api,
+			apiKey: "HOST_E2E_FAUX_KEY",
+			baseUrl: faux.getModel().baseUrl,
+			models: faux.models,
+		});
 		await modelRuntime.setRuntimeApiKey(faux.getModel().provider, "host-e2e-faux-key", { allowNetwork: false });
 		const sessionManager = SessionManager.create(project, sessionDir);
 		({ session } = await createAgentSession({
@@ -322,13 +328,6 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 
 		const notifications = [];
 		await session.bindExtensions({ uiContext: createNotifier(notifications) });
-		await session.prompt("/continuity status");
-		assert(
-			notifications.some(({ message }) => message.includes("Continuity: no valid checkpoint is present")),
-			`${label} must report no checkpoint before compaction`,
-		);
-		assert.equal(faux.state.callCount, 0, "status before compaction must not call the provider");
-
 		const now = Date.now();
 		sessionManager.appendMessage({
 			role: "user",
@@ -349,10 +348,44 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		sessionManager.appendMessage(assistant);
 		session.agent.state.messages = sessionManager.buildSessionContext().messages;
 
-		const compaction = await session.compact();
-		assert.equal(faux.state.callCount, 1, "real compaction must make exactly one faux provider call");
-		assert.equal(faux.getPendingResponseCount(), 0, "the deterministic faux response must be consumed");
-		assert(compaction.summary.includes("Verify pi-continuity on both current Pi hosts"));
+		faux.setResponses([
+			fauxAssistantMessage(
+				JSON.stringify({
+					task: "Verify pi-continuity on both current Pi hosts",
+					doneWhen: "The committed continuity summary is visible in the session",
+					constraints: ["Do not call a paid or network model provider"],
+					established: ["The package manifest loaded the continuity extension"],
+					open: [],
+					next: ["Report the exact tested host SHA"],
+				}),
+			),
+		]);
+		const continuationSettled = new Promise((resolveSettled, rejectSettled) => {
+			let continuationStarted = false;
+			const timeout = setTimeout(() => {
+				unsubscribe();
+				rejectSettled(new Error("manual continuity did not settle within 10 seconds"));
+			}, 10_000);
+			const unsubscribe = session.subscribe((event) => {
+				if (
+					event.type === "message_end" &&
+					event.message.role === "custom" &&
+					event.message.customType === "pi-continuity/continue"
+				) {
+					continuationStarted = true;
+					return;
+				}
+				if (event.type !== "message_end" || event.message.role !== "assistant" || !continuationStarted) return;
+				clearTimeout(timeout);
+				unsubscribe();
+				resolveSettled();
+			});
+		});
+		await session.prompt("/continuity");
+		await continuationSettled;
+		await new Promise((resolvePersisted) => setImmediate(resolvePersisted));
+		assert.equal(faux.state.callCount, 2, "manual continuity must synthesize once and start exactly one continuation turn");
+		assert.equal(faux.getPendingResponseCount(), 0, "the deterministic faux responses must be consumed");
 
 		const sessionFile = sessionManager.getSessionFile();
 		assert(sessionFile, "persistent SessionManager must expose its JSONL file");
@@ -362,17 +395,47 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			.map((line) => JSON.parse(line));
 		const compactions = entries.filter((entry) => entry.type === "compaction");
 		assert.equal(compactions.length, 1, "JSONL must persist exactly one standard compaction entry");
-		assert.equal(compactions[0].details?.schema, "pi.continuity.checkpoint");
-		assert.equal(compactions[0].details?.effective?.task, "Verify pi-continuity on both current Pi hosts");
-		assert.equal("projection" in compactions[0], false, "host E2E must not restore retired projection behavior");
+		assert.equal(compactions[0].summary.includes("Verify pi-continuity on both current Pi hosts"), true);
+		assert.deepEqual(compactions[0].details?.readFiles, []);
+		assert.deepEqual(compactions[0].details?.modifiedFiles, []);
+		const continuations = entries.filter((entry) => entry.type === "custom_message" && entry.customType === "pi-continuity/continue");
+		assert.equal(continuations.length, 1, "manual continuity must persist exactly one hidden custom continuation");
+		assert.equal(continuations[0].display, false, "continuation must not display in the TUI");
 
-		await session.prompt("/continuity status");
-		assert(
-			notifications.some(({ message }) => message.includes("## Task") && message.includes("Verify pi-continuity on both current Pi hosts")),
-			`${label} must rebuild status from the committed session_compact lifecycle`,
+		const compactionsBeforeThreshold = entries.filter((entry) => entry.type === "compaction").length;
+		const continuationsBeforeThreshold = continuations.length;
+		faux.setResponses([
+			fauxAssistantMessage("Threshold source response."),
+			fauxAssistantMessage(
+				JSON.stringify({
+					task: "Verify Pi-scheduled automatic continuity compaction",
+					doneWhen: "Pi commits the continuity summary without a plugin-started continuation",
+					constraints: ["Keep automatic scheduling owned by Pi"],
+					established: ["The manual continuity path already passed"],
+					open: [],
+					next: ["Inspect the automatic compaction entry"],
+				}),
+			),
+		]);
+		const thresholdModel = { ...faux.getModel(), contextWindow: 500 };
+		await session.setModel(thresholdModel);
+		await session.prompt(`Verify automatic continuity scheduling. ${"A".repeat(4096)}`);
+		await session.waitForIdle();
+		assert.equal(faux.state.callCount, 4, "Pi threshold handling must run one user turn and synthesize one continuity summary");
+		assert.equal(faux.getPendingResponseCount(), 0, "automatic compaction responses must be consumed");
+		const automaticEntries = (await readFile(sessionFile, "utf8"))
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		const automaticCompactions = automaticEntries.filter((entry) => entry.type === "compaction");
+		assert.equal(automaticCompactions.length, compactionsBeforeThreshold + 1, "Pi must commit exactly one threshold compaction");
+		assert.equal(automaticCompactions.at(-1).summary.includes("Verify Pi-scheduled automatic continuity compaction"), true);
+		assert.equal(
+			automaticEntries.filter((entry) => entry.type === "custom_message" && entry.customType === "pi-continuity/continue").length,
+			continuationsBeforeThreshold,
+			"automatic compaction must not persist a plugin-started continuation",
 		);
-		assert.equal(faux.state.callCount, 1, "status after compaction must not call the provider");
-		console.log(`[${label}] PASS at ${sha}: package discovery, persisted compaction, committed status, faux-only provider`);
+		console.log(`[${label}] PASS at ${sha}: package discovery, manual compact-and-continue, Pi-scheduled threshold compact, faux-only provider`);
 	} finally {
 		session?.dispose();
 		faux.unregister();

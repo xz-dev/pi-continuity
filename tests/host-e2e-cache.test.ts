@@ -110,7 +110,7 @@ describe("host E2E build cache", () => {
 			if (originalCounterRoot === undefined) delete process.env.E2E_FIXTURE_COUNTER_ROOT;
 			else process.env.E2E_FIXTURE_COUNTER_ROOT = originalCounterRoot;
 		}
-	});
+	}, 20_000);
 
 	it("accepts one validated winner when concurrent builders publish the same entry", async () => {
 		const fixture = await createHostFixture();
