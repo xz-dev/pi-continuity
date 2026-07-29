@@ -94,7 +94,15 @@ describe("host E2E build cache", () => {
 
 			const manifestPath = join(hostRoot, ".pi-continuity-host-e2e-build-v1.json");
 			const matchingManifest = await readFile(manifestPath, "utf8");
-			await run("git", ["commit", "--allow-empty", "-m", "wrong head"], hostRoot);
+			await run(
+				"git",
+				[
+					"-c", "user.name=Cache Test",
+					"-c", "user.email=cache@example.test",
+					"commit", "--allow-empty", "-m", "wrong head",
+				],
+				hostRoot,
+			);
 			const wrongHead = (await run("git", ["rev-parse", "HEAD"], hostRoot)).stdout.trim();
 			assert.notEqual(wrongHead, fixture.sha);
 			const repairedHead = await prepareHost(options);
