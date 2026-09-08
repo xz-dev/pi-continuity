@@ -27,7 +27,7 @@ async function createHostFixture() {
 		JSON.stringify({
 			name: "fake-pi-host",
 			version: "1.0.0",
-			scripts: { "hydrate:model-data": "node scripts/output.mjs hydrate" },
+			scripts: { "hydrate:model-data": "node scripts/output.mjs hydrate", "build:offline": "node scripts/output.mjs all" },
 		}),
 	);
 	await writeFile(join(source, "package-lock.json"), JSON.stringify({ name: "fake-pi-host", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fake-pi-host", version: "1.0.0" } } }));
@@ -39,33 +39,18 @@ const root = resolve(import.meta.dirname, "..");
 const command = process.argv[2];
 const outputs = {
   hydrate: ["hydrate-count", []],
-  tui: ["tui-build-count", ["packages/tui/dist/index.js"]],
-  ai: ["ai-build-count", ["packages/ai/dist/index.js", "packages/ai/dist/compat.js"]],
-  agent: ["agent-build-count", ["packages/agent/dist/index.js", "packages/agent/dist/node.js"]],
-  coding: ["coding-build-count", ["packages/coding-agent/dist/index.js"]],
+  all: ["coding-build-count", ["packages/chord/dist/index.js", "packages/chord/dist/context/index.js", "packages/session-backends/sqlite-node/dist/index.js", "packages/protocol/dist/index.js", "packages/client/dist/index.js", "packages/server/dist/index.js", "packages/telemetry/dist/index.js", "packages/tui/dist/index.js", "packages/ai/dist/index.js", "packages/ai/dist/compat.js", "packages/agent/dist/index.js", "packages/agent/dist/node.js", "packages/coding-agent/dist/index.js"]],
 };
 const [counter, files] = outputs[command];
 await appendFile(resolve(process.env.E2E_FIXTURE_COUNTER_ROOT, counter), "1\\n");
 for (const file of files) { await mkdir(resolve(root, file, ".."), { recursive: true }); await writeFile(resolve(root, file), "export {};\\n"); }
 `,
 	);
-	for (const [name, command] of [
-		["tui", "tui"],
-		["ai", "ai"],
-		["agent", "agent"],
-		["coding-agent", "coding"],
-	] as const) {
-		await mkdir(join(source, "packages", name), { recursive: true });
-		await writeFile(
-			join(source, "packages", name, "package.json"),
-			JSON.stringify({ name, version: "1.0.0", scripts: { build: `node ../../scripts/output.mjs ${command}`, "build:offline": `node ../../scripts/output.mjs ${command}` } }),
-		);
-	}
 	await run("git", ["init", "-b", "main"], source);
 	await run("git", ["config", "user.name", "Cache Test"], source);
 	await run("git", ["config", "user.email", "cache@example.test"], source);
 	await run("git", ["add", "."], source);
-	await run("git", ["commit", "-m", "fixture"], source);
+	await run("git", ["-c", "commit.gpgsign=false", "commit", "-m", "fixture"], source);
 	const { stdout } = await run("git", ["rev-parse", "HEAD"], source);
 	return { root, counters, source, sha: stdout.trim(), cacheRoot: join(root, "cache") };
 }
@@ -99,6 +84,7 @@ describe("host E2E build cache", () => {
 				[
 					"-c", "user.name=Cache Test",
 					"-c", "user.email=cache@example.test",
+					"-c", "commit.gpgsign=false",
 					"commit", "--allow-empty", "-m", "wrong head",
 				],
 				hostRoot,

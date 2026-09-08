@@ -50,9 +50,9 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.cache/pi-continuity-e2e/hosts
-          key: pi-continuity-e2e-${{ runner.os }}-${{ runner.arch }}-node22-recipe2-${{ matrix.host }}-${{ steps.host.outputs.sha }}
+          key: pi-continuity-e2e-${{ runner.os }}-${{ runner.arch }}-node22-recipe4-${{ matrix.host }}-${{ steps.host.outputs.sha }}
       - run: npm ci
       - run: npm run ${{ matrix.script }}
         env:
           E2E_HOST_SHA: ${{ steps.host.outputs.sha }}
-          E2E_HOST_CACHE_RECIPE: "2"
+          E2E_HOST_CACHE_RECIPE: "4"

@@ -1,72 +1,158 @@
 # pi-continuity
 
-`pi-continuity` gives [Pi](https://github.com/earendil-works/pi) a dedicated continuity summary whenever Pi compacts a session.
+`pi-continuity` gives [Pi](https://github.com/earendil-works/pi) a six-field continuity summary and a bounded selection of original user quotations when it compacts a session.
 
-The extension asks the current model to extract only the information needed to resume work:
+The model proposes what to retain. Code verifies each selected quotation against raw user text and copies it exactly into the summary Pi uses for continuation. This protects **selected, validated, retained spans** from paraphrasing; it does not guarantee selection of every important instruction or correct behavior by the continuing model.
 
-- the current task;
-- the completion condition;
-- constraints;
-- established facts and decisions;
-- open work;
-- next actions.
+## Compatibility and installation
 
-It validates the extraction against a strict bounded schema and renders deterministic Markdown for Pi's standard compaction entry.
-
-## Compatibility
-
-Version 0.2.0 requires Node.js 22.19.0 or newer and Pi 0.82.0 or newer.
-
-## Install
+Version 0.2.0 requires Node.js 22.19.0 or newer and Pi 0.82.0 or newer. Unit tests use Pi 0.82.0; the host verification below identifies the specific newer revisions tested, not a guarantee about every future release.
 
 ```sh
 pi install git:github.com/xz-dev/pi-continuity
 ```
 
-or:
+Or:
 
 ```sh
 pi install https://github.com/xz-dev/pi-continuity
 ```
 
-Update the installed package with:
+Update the installed package:
 
 ```sh
 pi update --extensions
 ```
 
-## Usage
+## Two features, unchanged ownership
 
-Run:
+### Manual compaction and continuation
 
 ```text
 /continuity
 ```
 
-The command immediately requests Pi's manual compaction flow. Pi aborts and settles active work just as it does for its built-in `/compact` command. After the compaction commits successfully, pi-continuity sends one hidden custom message that starts a continuation turn from the new summary.
+No arguments are supported. Pi's manual compaction flow aborts and settles active work, as its built-in `/compact` does. After a successful compaction commit, the extension sends one hidden `pi-continuity/continue` message to start a continuation turn. Pending duplicate commands do not create another compaction or turn; stale callbacks cannot complete a later request.
 
-A failed or cancelled compaction does not start a continuation. Repeated `/continuity` requests while the same compaction is pending do not start duplicate compactions or turns.
+A failed or cancelled compaction does not start that continuation. A successful **native fallback** commit can still start it; this does not mean source-verified continuity succeeded.
 
-## Automatic compaction
+### Pi-scheduled automatic compaction
 
-Pi's native threshold and overflow compaction also use the dedicated continuity summary:
+Threshold and overflow events use the same extraction:
 
-- **Threshold:** Pi decides when to compact and whether queued work should continue.
-- **Overflow:** Pi preserves its normal compact-and-retry behavior.
+- **Threshold:** Pi decides when to compact and whether queued work continues.
+- **Overflow:** Pi owns compact-and-retry behavior.
 
-The extension does not define thresholds, initiate automatic turns, or take ownership of retry and queue scheduling.
+The extension does not set thresholds, schedule automatic turns, or own retries and queues. Ordinary `/compact` stays native. There are no checkpoint, locking, approval or artifact-state commands.
 
-Pi's built-in `/compact` remains native. The dedicated manual continuity flow is selected only by `/continuity`; automatic threshold and overflow events use the same summary without adding a plugin-started continuation.
+## What the summary contains
 
-## Failure behavior
+The semantic state has exactly six fields:
 
-Continuity synthesis is fail-open. If no model or authentication is available, the request is cancelled, the model fails, or its output does not match the schema, the extension returns no replacement result. Pi may then use its native compaction summary.
+| Field | Meaning |
+| --- | --- |
+| `task` | Latest unmet request, including questions, comparisons and discussion—not automatically implementation |
+| `doneWhen` | Acceptance conditions |
+| `constraints` | Effective limits and corrections |
+| `established` | Observations and decisions supported by the history |
+| `open` | Unresolved work, failures and pending approvals |
+| `next` | Smallest authorized next actions; empty when no work remains |
 
-A successful continuity result preserves Pi's cumulative file-operation details: files only read remain under `readFiles`, while written or edited files appear under `modifiedFiles`.
+The extraction prompt distinguishes tool attempts from observed results, completed edits from passing tests, and a plan from approval. It asks the model to reconcile older state with newer corrections and stop signals. These are instructions to a model, not semantic correctness checks.
+
+Pi's actual summary text contains the six semantic sections, **Original user evidence**, **Files**, and **Retention coverage**. User quotations and file paths are JSON-escaped; decoding a quotation recovers its exact original text, including newlines, quotes and indentation. Putting data only in compaction `details` would not make it visible to the continuing model, so retained evidence and displayed files are rendered into the summary itself.
+
+### Selected original evidence
+
+The model returns a `summary/quotes/retire` envelope. Code—not the model—establishes provenance:
+
+- Sources are raw user text blocks on the current branch, before `convertToLlm`, using their original block indices. Assistant output, tool results and generated summaries are not user sources.
+- Selection must match one offered continuous window exactly. No trimming, whitespace normalization, gap joining or invented source paths is accepted. Offsets are absolute UTF-16 code units; invalid Unicode spans and overlong quotations are rejected, not shortened.
+- Each identity is SHA-256 over `JSON.stringify([entryId, blockIndex, start, end, copiedText])`.
+- The catalogue prioritizes validated carried evidence, the latest two user messages (including kept messages), the bootstrap user message, then newly summarized user blocks newest first. Blocks up to 4000 code units are offered whole; longer blocks use head/tail windows of about 2000 each, with gaps disclosed.
+- Unmentioned prior evidence carries forward. Retirement requires a valid quotation from a newer user source. A validated retirement wins over a contradictory re-selection of that same identity in the same response; no permanent tombstone is created. The validator proves source identity and ordering, **not that the model's retirement reason is semantically justified**.
+- Constraints and corrections take priority under the evidence budget, followed by acceptance and task spans. Whole quotations that do not fit are omitted and counted.
+
+A quotation is historical evidence, not fresh permission to repeat completed work or bypass approval. Zero reported mechanical omissions does **not** mean all important intent was selected.
+
+### Persistence, files and recovery
+
+Compaction `details` retain compatible `readFiles` and `modifiedFiles` arrays plus a version-1 `continuity` namespace containing source references and coverage counters. References contain `id`, `entryId`, `blockIndex`, `start`, `end` and `kind`; they do not duplicate quotation text or store a second semantic summary.
+
+On another compaction or after JSONL reload, references are revalidated against the raw current branch. Missing or changed source spans are counted as unavailable. Only the **latest current-branch compaction** supplies prior continuity metadata: after a native, legacy or unknown-version entry, coverage is `rebuilt`, not borrowed from an older continuity entry. Raw user sources can still be selected anew. Initial extraction reports `initial`; recognized prior metadata reports `carried`.
+
+Available latest-compaction file metadata is merged with current file operations. Written/edited files take precedence over read-only files. Complete compatible arrays stay in `details`, while the displayed section is bounded and modified-first. Unavailable older metadata is not an independent file archive.
+
+Coverage reports source-window/character omissions, rejected selections/retirements, evidence/file display omissions, unavailable prior references and retirements. Recovery text includes the transcript path when one exists, entry/block/span locators, and at most four omitted-source locations. In-memory sessions explicitly have no transcript file. These are recovery pointers, not automatic retrieval or a guarantee that omitted material can be recovered.
+
+## Budgets: soft target versus safety bounds
+
+Let `C` be the current model's context window, `R = min(C, Pi reserveTokens)`, and `G = min(R, positive model.maxTokens)` (or `R` when that model limit is unknown). Invalid context/reserve settings cause input-budget fallback.
+
+For estimated content size `T` of the prior summary, prepared history and split-turn prefix, excluding fixed instructions and the extra catalogue:
+
+```text
+hermesTarget   = max(2000, min(floor(0.20*T), floor(0.05*C), 10000))
+responseTarget = min(hermesTarget, G)
+```
+
+`responseTarget` is guidance, not a rejection threshold. A complete result above it is accepted if it fits the safety bounds. The plugin **does not pass an explicit `maxTokens` option**; SDK/provider/model limits still apply, and generation is not unlimited.
+
+| Bound | Value |
+| --- | --- |
+| Final rendered summary | `R` estimated tokens; normally 16384 |
+| Raw response, before trimming | `16 * R` UTF-16 code units; normally 262144 |
+| Four semantic lists combined | At most 128 items; no separate 24-item/category limit |
+| Semantic scalar/list item length | No independent 2000/1000-character gates; shared bounds still apply |
+| Quote proposals / retirement proposals | At most 32 each; an oversized group is rejected and counted |
+| One quotation | At most 1200 UTF-16 code units |
+| Source catalogue | At most 6144 estimated tokens, reduced further when input space is short |
+| Evidence / displayed files | Target ceilings 1536 / 512 estimated tokens, within remaining `R` |
+| Request headroom | `G + 4096`, in addition to the complete request and system prompt |
+
+The plugin uses Pi's public token estimator, not an exact tokenizer guarantee. History uses Pi's public serialization, including its own tool-output limits. The plugin reduces the extra source catalogue rather than adding separate history slicing. Rendering preserves complete semantic state and coverage/recovery scaffolding; if the total is too large, it reduces displayed files first, then whole quotations. It does not truncate semantic lists to manufacture success. If required content cannot fit, synthesis fails and Pi may fall back natively. These constants are initial choices, not proven semantic-quality optima.
+
+## Failure and cancellation
+
+All ordinary extraction failures allow Pi's native fallback: unavailable model/auth, provider error, empty or length-limited output, invalid JSON/schema, invalid source boundaries, and input/semantic/render budget failures. The plugin neither repairs partial JSON nor retries extraction. Individual bad quotations can be rejected while a valid semantic summary is committed, with coverage counts.
+
+An explicit host/user cancellation or provider `aborted` result is different: the extension does not intentionally fall back or continue that cancelled request. A missing replacement returned alongside an already-aborted host signal is not permission to restart work.
+
+Failures produce a bounded UI warning or one headless stderr line with a reason code. They do not create diagnostic chat messages or include raw provider errors, credentials or conversation text. Native fallback may make additional requests, has its own limits/retries, can itself fail, and does **not** guarantee source-verified retention. Conversely, a schema-valid but semantically wrong summary is not detected automatically and need not trigger fallback.
+
+## Verification and its limits
+
+```sh
+npm test
+npm run check
+npm run test:e2e:upstream-pi
+npm run test:e2e:xz-dev-pi
+```
+
+The host harness packs the extension, loads that package into isolated test sessions and uses a **faux provider**, not a real model. It builds the selected host through its existing root `build:offline` chain and validates the cached build. CI cache recipe and local validation use recipe 4. `E2E_HOST_SHA` can freeze the host revision instead of resolving its current `main`.
+
+Mechanically verified host revisions:
+
+| Host | Pi version | Commit |
+| --- | --- | --- |
+| `earendil-works/pi` | 0.85.1 | `b2602be77cb7b0de45dd616407fd210daa48aa75` |
+| `xz-dev/pi` | 0.85.1 | `367c709ac2114fca17e6dc3daa3641dbbd50a27e` |
+
+The scenarios cover commit-to-disk before continuation, three compactions and fresh-extension JSONL reload, exact evidence and files in continuation requests, corrections, sibling isolation, native-gap reconstruction, native fallback success/failure, cancellation, duplicate commands, auth/usage, and automatic ownership. Each host run has 37 faux requests. At the **faux response factory after SDK normalization**, plugin requests have no `maxTokens` value and native requests have `13107`; this is not an HTTP-wire measurement or a statement about every provider. The threshold fixture changes the model window after the host's pre-prompt check to exercise scheduling; it is not a live capacity benchmark.
+
+The [synthetic corpus](tests/fixtures/README.md) defines nine histories, expected source/state annotations and next-action outcomes after at least three compactions and reload. Deterministic tests validate its structure, not model choices. **Real-model semantic fidelity and the baseline/candidate/Hermes behavioral comparison have not been verified.** They require separately approved model access, data and cost. Wrong continuation behavior fails that evaluation even when source copying, JSON validation and persistence pass.
+
+## Reference choices
+
+The primary reference is Hermes Agent's [runtime `ContextCompressor`](https://github.com/NousResearch/hermes-agent/blob/6e2b8e070d28b1a3381a3fb290b6b8d6cce13cef/agent/context_compressor.py), pinned to `6e2b8e070d28b1a3381a3fb290b6b8d6cce13cef`: content-scaled guidance, initial/update reconciliation and bounded recovery context. This is not its offline trajectory compressor, and no Hermes database, retrieval or scheduling subsystem is imported.
+
+[pi-continue v0.9.3](https://github.com/Tiziano-AI/pi-continue/tree/42fa058aab1f2d9bb3b7768ac304e69f18c3a1e7) is supplementary for reconciliation and message filtering. Its artifact/AGENTS state machine and fail-closed policy are not adopted. Reference-inspired design is not a measured equivalence or improvement claim.
 
 ## Security
 
-Pi extensions execute with the same system access as Pi. Review this repository before installing it. Conversation and prior-summary text are treated as untrusted data in the extraction prompt, and model output is accepted only through a strict bounded schema, but those checks do not turn an extension or model provider into a security boundary.
+Pi extensions have Pi's system access. Review this repository before installation. Raw stock-Pi `user` roles are a provenance convention, **not authentication against other extensions or an untrusted transcript editor**. Hashes bind the copied span to its source coordinates; they do not prove authorship, selection completeness or model obedience.
+
+History, prior summaries, files and quotations are framed as untrusted data. Strict output validation and exact copying do not eliminate prompt injection or make the model a security boundary. The prompt asks the model not to select secrets, but that is not a secret detector: selected text is sent to the current provider and persisted in the summary. Do not include credentials or other sensitive material on the assumption that compaction will remove it.
 
 ## License
 

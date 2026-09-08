@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
@@ -8,10 +9,17 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const requiredNode = [22, 19, 0];
-const hostBuildRecipeVersion = "2";
+const hostBuildRecipeVersion = "4";
 const buildMarker = ".pi-continuity-host-e2e-built-v1";
 const buildManifest = ".pi-continuity-host-e2e-build-v1.json";
 const requiredOutputs = [
+	"packages/chord/dist/index.js",
+	"packages/chord/dist/context/index.js",
+	"packages/session-backends/sqlite-node/dist/index.js",
+	"packages/protocol/dist/index.js",
+	"packages/client/dist/index.js",
+	"packages/server/dist/index.js",
+	"packages/telemetry/dist/index.js",
 	"packages/tui/dist/index.js",
 	"packages/ai/dist/index.js",
 	"packages/ai/dist/compat.js",
@@ -181,10 +189,7 @@ export async function prepareHost({ source, label, sha, cacheRoot }) {
 		// Generated model data is gitignored. Hydrate it explicitly, then use the host's
 		// offline AI build so compilation itself cannot refresh provider catalogs.
 		await run("npm", ["--prefix", staging, "run", "hydrate:model-data"], { env });
-		await run("npm", ["--prefix", join(staging, "packages/tui"), "run", "build"], { env });
-		await run("npm", ["--prefix", join(staging, "packages/ai"), "run", "build:offline"], { env });
-		await run("npm", ["--prefix", join(staging, "packages/agent"), "run", "build"], { env });
-		await run("npm", ["--prefix", join(staging, "packages/coding-agent"), "run", "build"], { env });
+		await run("npm", ["--prefix", staging, "run", "build:offline"], { env });
 		await writeFile(join(staging, buildMarker), `${sha}\n`);
 		await writeFile(join(staging, buildManifest), `${JSON.stringify(expected, null, 2)}\n`);
 		const built = await inspectHostCache(staging, expected);
@@ -239,204 +244,297 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 	const codingAgent = await import(pathToFileURL(join(hostRoot, "packages/coding-agent/dist/index.js")));
 	const { fauxAssistantMessage, registerFauxProvider } = ai;
 	const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = codingAgent;
-
-	for (const [name, value] of Object.entries({
-		fauxAssistantMessage,
-		registerFauxProvider,
-		createAgentSession,
-		DefaultResourceLoader,
-		ModelRuntime,
-		SessionManager,
-		SettingsManager,
-	})) {
+	for (const [name, value] of Object.entries({ fauxAssistantMessage, registerFauxProvider, createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager })) {
 		assert(value, `${label} does not export required public API ${name}`);
 	}
-
+	const hostVersion = JSON.parse(await readFile(join(hostRoot, "packages/coding-agent/package.json"), "utf8")).version;
 	const project = join(workRoot, "project");
 	const agentDir = join(workRoot, "agent");
 	const sessionDir = join(workRoot, "sessions");
 	await mkdir(join(project, ".pi"), { recursive: true });
 	await mkdir(agentDir, { recursive: true });
-	await writeFile(
-		join(project, ".pi/settings.json"),
-		JSON.stringify(
-			{
-				packages: [pluginRoot],
-				compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 },
-			},
-			null,
-			2,
-		),
-	);
-
+	await writeFile(join(project, ".pi/settings.json"), JSON.stringify({
+		packages: [pluginRoot],
+		compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 16384 },
+		// Keep failure scenarios bounded; this does not change the user's host settings.
+		retry: { enabled: false, provider: { maxRetries: 0 } },
+	}));
 	const settingsManager = SettingsManager.create(project, agentDir);
-	const resourceLoader = new DefaultResourceLoader({
-		cwd: project,
-		agentDir,
-		settingsManager,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-	});
-	await resourceLoader.reload();
-	const loaded = resourceLoader.getExtensions();
-	assert.deepEqual(loaded.errors, [], `${label} failed to load the packed extension`);
-	assert.equal(loaded.extensions.length, 1, `${label} must discover exactly one extension`);
-	assert.equal(
-		resolve(loaded.extensions[0].resolvedPath),
-		resolve(pluginRoot, "extensions/continuity.ts"),
-		`${label} must discover continuity.ts through package.json pi.extensions`,
-	);
-
-	const faux = registerFauxProvider();
+	const faux = registerFauxProvider({ models: [{ id: "continuity-e2e", contextWindow: 128000, maxTokens: 16384 }] });
+	const notifications = [];
+	const requests = [];
+	const callbackFailures = [];
+	const rootConstraint = '只分析，不修改文件。\n  Keep "quoted" user text exactly.';
+	const oldPort = "Use port 8080.";
+	const newPort = "Use port 8081 instead of port 8080.";
+	const original = `${rootConstraint}\n${oldPort}`;
+	const fixturePath = "src/host-fixture.ts";
+	let phase = "";
+	let selected = [];
+	let retiredId;
 	let session;
-	try {
-		faux.setResponses([
-			fauxAssistantMessage(
-				JSON.stringify({
-					task: "Verify pi-continuity on both current Pi hosts",
-					doneWhen: "The committed continuity summary is visible in the session",
-					constraints: ["Do not call a paid or network model provider"],
-					established: ["The package manifest loaded the continuity extension"],
-					open: [],
-					next: ["Report the exact tested host SHA"],
-				}),
-			),
-		]);
-
-		const modelRuntime = await ModelRuntime.create({ modelsPath: null, allowModelNetwork: false });
-		modelRuntime.registerProvider(faux.getModel().provider, {
-			name: "Faux",
-			api: faux.api,
-			apiKey: "HOST_E2E_FAUX_KEY",
-			baseUrl: faux.getModel().baseUrl,
-			models: faux.models,
-		});
-		await modelRuntime.setRuntimeApiKey(faux.getModel().provider, "host-e2e-faux-key", { allowNetwork: false });
-		const sessionManager = SessionManager.create(project, sessionDir);
-		({ session } = await createAgentSession({
-			cwd: project,
-			agentDir,
-			model: faux.getModel(),
-			modelRuntime,
-			resourceLoader,
-			sessionManager,
-			settingsManager,
-			noTools: "all",
-		}));
-
-		const notifications = [];
-		await session.bindExtensions({ uiContext: createNotifier(notifications) });
-		const now = Date.now();
-		sessionManager.appendMessage({
-			role: "user",
-			content: [{ type: "text", text: "Implement and verify explicit host compatibility E2E coverage." }],
-			timestamp: now - 1000,
-		});
-		const assistant = fauxAssistantMessage("The host-neutral implementation is ready for lifecycle verification.", {
-			timestamp: now - 500,
-		});
-		assistant.usage = {
-			input: 100,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 100,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		};
-		sessionManager.appendMessage(assistant);
-		session.agent.state.messages = sessionManager.buildSessionContext().messages;
-
-		faux.setResponses([
-			fauxAssistantMessage(
-				JSON.stringify({
-					task: "Verify pi-continuity on both current Pi hosts",
-					doneWhen: "The committed continuity summary is visible in the session",
-					constraints: ["Do not call a paid or network model provider"],
-					established: ["The package manifest loaded the continuity extension"],
-					open: [],
-					next: ["Report the exact tested host SHA"],
-				}),
-			),
-		]);
-		const continuationSettled = new Promise((resolveSettled, rejectSettled) => {
-			let continuationStarted = false;
-			const timeout = setTimeout(() => {
-				unsubscribe();
-				rejectSettled(new Error("manual continuity did not settle within 10 seconds"));
-			}, 10_000);
-			const unsubscribe = session.subscribe((event) => {
-				if (
-					event.type === "message_end" &&
-					event.message.role === "custom" &&
-					event.message.customType === "pi-continuity/continue"
-				) {
-					continuationStarted = true;
-					return;
+	let manager;
+	let phaseStart = 0;
+	let duplicateRelease;
+	let overflowIssued = false;
+	const usage = { input: 42, output: 21, cacheRead: 0, cacheWrite: 0, totalTokens: 63, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+	function textOf(context) {
+		return context.messages.flatMap((message) => typeof message.content === "string" ? [message.content]
+			: message.content.filter((part) => part.type === "text").map((part) => part.text)).join("\n");
+	}
+	function branchCompaction() { return manager.getBranch().findLast((entry) => entry.type === "compaction"); }
+	function continuationCount() { return manager.getEntries().filter((entry) => entry.type === "custom_message" && entry.customType === "pi-continuity/continue").length; }
+	function seedUser(text) {
+		const id = manager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
+		session.agent.state.messages = manager.buildSessionContext().messages;
+		return id;
+	}
+	async function respond(context, options, _state, model) {
+		try {
+			const system = JSON.stringify(context.systemPrompt ?? "");
+			const text = textOf(context);
+			const kind = system.includes("exactly summary, quotes, retire") ? "plugin"
+				: system.includes("context summarization assistant") ? "native" : "assistant";
+			requests.push({ phase, kind, maxTokens: options?.maxTokens ?? null, modelMaxTokens: model.maxTokens, stop: "stop" });
+			assert(requests.length - phaseStart <= 8, `${phase}: unexpected request loop`);
+			if (kind === "plugin") {
+				assert.equal(options?.apiKey, "host-e2e-faux-key", "compaction must reuse the runtime model auth");
+				if (phase === "cancel") {
+					session.abortCompaction();
+					requests.at(-1).stop = "aborted";
+					return fauxAssistantMessage([], { stopReason: "aborted" });
 				}
-				if (event.type !== "message_end" || event.message.role !== "assistant" || !continuationStarted) return;
-				clearTimeout(timeout);
-				unsubscribe();
-				resolveSettled();
-			});
-		});
+				if (phase === "duplicate") await new Promise((release) => { duplicateRelease = release; });
+				if (phase === "invalid-json" || phase === "native-failure") return fauxAssistantMessage("invalid fixture JSON");
+				if (phase === "empty") return fauxAssistantMessage("");
+				if (phase === "truncated") {
+					requests.at(-1).stop = "length";
+					return fauxAssistantMessage('{"summary":', { stopReason: "length" });
+				}
+				if (phase === "provider-error") {
+					requests.at(-1).stop = "error";
+					return fauxAssistantMessage([], { stopReason: "error", errorMessage: "HTTP 400 synthetic permanent extraction failure" });
+				}
+				const sources = text.split("\n").filter((line) => line.startsWith('{"sourceId":')).map((line) => JSON.parse(line));
+				const quotes = selected.map((quote) => {
+					const source = sources.find((source) => source.text.includes(quote));
+					assert(source, `${phase}: expected raw user source was not offered`);
+					return { sourceId: source.sourceId, quote, kind: quote === newPort ? "correction" : "constraint" };
+				});
+				const retire = phase === "correction" ? [{ evidenceId: retiredId, reason: "superseded", sourceId: quotes[0].sourceId, quote: newPort }] : [];
+				const message = fauxAssistantMessage(JSON.stringify({
+					summary: { task: "Verify bounded continuity on both Pi hosts", doneWhen: "Source and lifecycle assertions pass", constraints: ["No real model or file tools", "Latest user decisions govern"], established: ["Synthetic host fixture only"], open: [], next: ["Report mechanical verification, not semantic fidelity"] },
+					quotes, retire,
+				}));
+				return message;
+			}
+			if (kind === "native") {
+				if (phase === "native-failure") {
+					requests.at(-1).stop = "error";
+					return fauxAssistantMessage([], { stopReason: "error", errorMessage: "HTTP 400 synthetic permanent native failure" });
+				}
+				return fauxAssistantMessage("Native fixture summary; source-verified continuity is not guaranteed.");
+			}
+			if (phase === "threshold") {
+				// Lower the window only after the pre-prompt check, to exercise one
+				// post-turn threshold event rather than both host check points.
+				await session.setModel({ ...faux.getModel(), contextWindow: 16000, maxTokens: 512 });
+				return fauxAssistantMessage("Synthetic threshold source response.");
+			}
+			if (phase === "overflow" && !overflowIssued) {
+				overflowIssued = true;
+				requests.at(-1).stop = "error";
+				return fauxAssistantMessage([], { stopReason: "error", errorMessage: "maximum context length exceeded" });
+			}
+			if (phase !== "overflow") {
+				const branch = manager.getBranch();
+				const compact = branchCompaction();
+				const continuation = branch.findLast((entry) => entry.type === "custom_message" && entry.customType === "pi-continuity/continue");
+				assert(compact && continuation, `${phase}: assistant request preceded the commit/continuation`);
+				assert(branch.indexOf(compact) < branch.indexOf(continuation), "commit must precede the continuation");
+				assert.equal(continuation.display, false);
+				const persisted = (await readFile(manager.getSessionFile(), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+				assert(persisted.some((entry) => entry.id === compact.id), "compaction must be on disk before the continuation request");
+				for (const ref of compact.details?.continuity?.evidence ?? []) {
+					const source = branch.find((entry) => entry.id === ref.entryId);
+					assert.equal(source?.type, "message");
+					assert.equal(source.message.role, "user");
+					const block = typeof source.message.content === "string" ? source.message.content : source.message.content[ref.blockIndex].text;
+					const originalText = block.slice(ref.start, ref.end);
+					assert.equal(ref.id, createHash("sha256").update(JSON.stringify([ref.entryId, ref.blockIndex, ref.start, ref.end, originalText])).digest("hex"));
+					assert(text.includes(JSON.stringify(originalText)), "continuing model must actually receive the exact quoted text");
+					assert(text.includes(ref.id), "continuing model must receive the verified identity");
+				}
+				for (const path of [...(compact.details?.readFiles ?? []), ...(compact.details?.modifiedFiles ?? [])]) assert(text.includes(JSON.stringify(path)), "available fixture file must be in continuing model input");
+			}
+			return fauxAssistantMessage("Synthetic continuation settled; no semantic behavior claim.");
+		} catch (error) {
+			callbackFailures.push(error.message);
+			throw error;
+		}
+	}
+	function start(name, quotes = []) {
+		phase = name;
+		selected = quotes;
+		phaseStart = requests.length;
+		// A bounded dispatcher accommodates the host's separate split-turn native summary.
+		faux.setResponses(Array.from({ length: 12 }, () => respond));
+	}
+	function calls(kind) { return requests.slice(phaseStart).filter((request) => request.kind === kind).length; }
+	async function settle() {
+		const deadline = Date.now() + 10000;
+		do {
+			await new Promise((resolveTurn) => setTimeout(resolveTurn, 5));
+			if (!session.isCompacting) await session.waitForIdle();
+			assert(Date.now() < deadline, `${phase}: host did not settle`);
+		} while (session.isCompacting || session.isStreaming);
+		assert.deepEqual(callbackFailures, [], "faux provider assertions failed");
+		assert.equal(requests.length, faux.state.callCount, "every model call must reach the scripted provider boundary");
+	}
+	let modelRuntime;
+	async function open(managerToOpen) {
+		session?.dispose();
+		manager = managerToOpen;
+		const resourceLoader = new DefaultResourceLoader({ cwd: project, agentDir, settingsManager, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+		await resourceLoader.reload();
+		const loaded = resourceLoader.getExtensions();
+		assert.deepEqual(loaded.errors, [], `${label}: packed extension loading failed`);
+		assert.equal(loaded.extensions.length, 1);
+		assert.equal(resolve(loaded.extensions[0].resolvedPath), resolve(pluginRoot, "extensions/continuity.ts"));
+		({ session } = await createAgentSession({ cwd: project, agentDir, model: faux.getModel(), modelRuntime, resourceLoader, sessionManager: manager, settingsManager, noTools: "all" }));
+		await session.bindExtensions({ uiContext: createNotifier(notifications) });
+	}
+	async function manual(name, quotes = []) {
+		seedUser(`Continue synthetic analysis (${name}); do not use real tools.`);
+		const before = continuationCount();
+		start(name, quotes);
 		await session.prompt("/continuity");
-		await continuationSettled;
-		await new Promise((resolvePersisted) => setImmediate(resolvePersisted));
-		assert.equal(faux.state.callCount, 2, "manual continuity must synthesize once and start exactly one continuation turn");
-		assert.equal(faux.getPendingResponseCount(), 0, "the deterministic faux responses must be consumed");
+		await settle();
+		assert.equal(calls("plugin"), 1, `${name}: exactly one plugin extraction`);
+		assert.equal(calls("native"), 0, `${name}: must not silently pass via native fallback`);
+		assert.equal(calls("assistant"), 1, `${name}: exactly one continuation`);
+		assert.equal(continuationCount(), before + 1);
+		assert.equal(branchCompaction().fromHook, true);
+		const reported = branchCompaction().usage;
+		assert(reported.input > 0 && reported.output > 0, "persist the faux provider's normalized usage, not the factory placeholder");
+		assert.equal(reported.totalTokens, reported.input + reported.output + reported.cacheRead + reported.cacheWrite);
+		return branchCompaction();
+	}
+	try {
+		modelRuntime = await ModelRuntime.create({ modelsPath: null, allowModelNetwork: false });
+		modelRuntime.registerProvider(faux.getModel().provider, { name: "Faux", api: faux.api, apiKey: "HOST_E2E_FAUX_KEY", baseUrl: faux.getModel().baseUrl, models: faux.models });
+		await modelRuntime.setRuntimeApiKey(faux.getModel().provider, "host-e2e-faux-key", { allowNetwork: false });
+		await open(SessionManager.create(project, sessionDir));
+		seedUser(original);
+		const assistant = fauxAssistantMessage([{ type: "text", text: "Synthetic preparation. ".repeat(100) }, { type: "toolCall", id: "fixture-write", name: "write", arguments: { path: fixturePath, content: "synthetic history, not an executed tool" } }]);
+		assistant.usage = usage;
+		manager.appendMessage(assistant);
+		manager.appendMessage({ role: "toolResult", toolCallId: "fixture-write", toolName: "write", content: [{ type: "text", text: "Synthetic write observation." }], isError: false, timestamp: Date.now() });
+		session.agent.state.messages = manager.buildSessionContext().messages;
+		const first = await manual("initial", [rootConstraint, oldPort]);
+		assert.equal(first.details.continuity.evidence.length, 2);
+		assert(first.details.modifiedFiles.includes(fixturePath));
+		const expected = first.details.continuity.evidence;
+		retiredId = expected.find((ref) => original.slice(ref.start, ref.end) === oldPort).id;
+		const file = manager.getSessionFile();
+		for (const name of ["omitted-round-2", "omitted-round-3"]) {
+			await open(SessionManager.open(file));
+			const compact = await manual(name);
+			assert.deepEqual(compact.details.continuity.evidence, expected);
+			assert.equal(compact.details.continuity.coverage.basis, "carried");
+			assert(compact.details.modifiedFiles.includes(fixturePath));
+		}
+		await open(SessionManager.open(file));
+		seedUser(newPort);
+		const corrected = await manual("correction", [newPort]);
+		assert.equal(corrected.details.continuity.coverage.retired, 1);
+		assert(!corrected.details.continuity.evidence.some((ref) => ref.id === retiredId));
+		assert.equal(corrected.details.continuity.evidence.length, 2);
 
-		const sessionFile = sessionManager.getSessionFile();
-		assert(sessionFile, "persistent SessionManager must expose its JSONL file");
-		const entries = (await readFile(sessionFile, "utf8"))
-			.trim()
-			.split("\n")
-			.map((line) => JSON.parse(line));
-		const compactions = entries.filter((entry) => entry.type === "compaction");
-		assert.equal(compactions.length, 1, "JSONL must persist exactly one standard compaction entry");
-		assert.equal(compactions[0].summary.includes("Verify pi-continuity on both current Pi hosts"), true);
-		assert.deepEqual(compactions[0].details?.readFiles, []);
-		assert.deepEqual(compactions[0].details?.modifiedFiles, []);
-		const continuations = entries.filter((entry) => entry.type === "custom_message" && entry.customType === "pi-continuity/continue");
-		assert.equal(continuations.length, 1, "manual continuity must persist exactly one hidden custom continuation");
-		assert.equal(continuations[0].display, false, "continuation must not display in the TUI");
+		const forkPoint = manager.getLeafId();
+		seedUser("Sibling-only constraint.");
+		const sibling = await manual("sibling", ["Sibling-only constraint."]);
+		const siblingId = sibling.details.continuity.evidence.find((ref) => !corrected.details.continuity.evidence.some((old) => old.id === ref.id)).id;
+		manager.branch(forkPoint);
+		seedUser("Independent branch after the fork.");
+		await open(SessionManager.open(file));
+		const isolated = await manual("isolated");
+		assert(!isolated.details.continuity.evidence.some((ref) => ref.id === siblingId));
+		assert(!isolated.summary.includes("Sibling-only constraint."));
 
-		const compactionsBeforeThreshold = entries.filter((entry) => entry.type === "compaction").length;
-		const continuationsBeforeThreshold = continuations.length;
-		faux.setResponses([
-			fauxAssistantMessage("Threshold source response."),
-			fauxAssistantMessage(
-				JSON.stringify({
-					task: "Verify Pi-scheduled automatic continuity compaction",
-					doneWhen: "Pi commits the continuity summary without a plugin-started continuation",
-					constraints: ["Keep automatic scheduling owned by Pi"],
-					established: ["The manual continuity path already passed"],
-					open: [],
-					next: ["Inspect the automatic compaction entry"],
-				}),
-			),
-		]);
-		const thresholdModel = { ...faux.getModel(), contextWindow: 500 };
-		await session.setModel(thresholdModel);
-		await session.prompt(`Verify automatic continuity scheduling. ${"A".repeat(4096)}`);
-		await session.waitForIdle();
-		assert.equal(faux.state.callCount, 4, "Pi threshold handling must run one user turn and synthesize one continuity summary");
-		assert.equal(faux.getPendingResponseCount(), 0, "automatic compaction responses must be consumed");
-		const automaticEntries = (await readFile(sessionFile, "utf8"))
-			.trim()
-			.split("\n")
-			.map((line) => JSON.parse(line));
-		const automaticCompactions = automaticEntries.filter((entry) => entry.type === "compaction");
-		assert.equal(automaticCompactions.length, compactionsBeforeThreshold + 1, "Pi must commit exactly one threshold compaction");
-		assert.equal(automaticCompactions.at(-1).summary.includes("Verify Pi-scheduled automatic continuity compaction"), true);
-		assert.equal(
-			automaticEntries.filter((entry) => entry.type === "custom_message" && entry.customType === "pi-continuity/continue").length,
-			continuationsBeforeThreshold,
-			"automatic compaction must not persist a plugin-started continuation",
-		);
-		console.log(`[${label}] PASS at ${sha}: package discovery, manual compact-and-continue, Pi-scheduled threshold compact, faux-only provider`);
+		seedUser("Native compact fixture boundary.");
+		const beforePlain = continuationCount();
+		start("plain-compact");
+		await session.compact();
+		await settle();
+		assert.equal(calls("plugin"), 0, "ordinary compact must remain native");
+		assert(calls("native") >= 1);
+		assert.equal(calls("assistant"), 0);
+		assert.equal(continuationCount(), beforePlain);
+		const rebuilt = await manual("rebuilt", [rootConstraint]);
+		assert.equal(rebuilt.details.continuity.coverage.basis, "rebuilt");
+
+		for (const name of ["invalid-json", "empty", "truncated", "provider-error"]) {
+			seedUser(`Native fallback fixture ${name}.`);
+			const before = continuationCount();
+			start(name);
+			await session.prompt("/continuity");
+			await settle();
+			assert.equal(calls("plugin"), 1);
+			assert(calls("native") >= 1 && calls("native") <= 2, "native fallback may summarize both history and split-turn prefix");
+			assert.equal(calls("assistant"), 1);
+			assert.notEqual(branchCompaction().fromHook, true);
+			assert.equal(continuationCount(), before + 1);
+		}
+		for (const name of ["native-failure", "cancel"]) {
+			seedUser(`Failure fixture ${name}.`);
+			const previous = branchCompaction().id;
+			const before = continuationCount();
+			start(name);
+			await session.prompt("/continuity");
+			await settle();
+			assert.equal(calls("plugin"), 1);
+			assert.equal(calls("assistant"), 0);
+			assert.equal(continuationCount(), before);
+			assert.equal(branchCompaction().id, previous);
+			if (name === "cancel") assert.equal(calls("native"), 0);
+			else assert(calls("native") >= 1);
+		}
+		seedUser("Duplicate pending command fixture.");
+		const beforeDuplicate = continuationCount();
+		start("duplicate");
+		await session.prompt("/continuity");
+		const deadline = Date.now() + 10000;
+		while (!duplicateRelease) {
+			assert(Date.now() < deadline, "duplicate fixture did not reach extraction");
+			await new Promise((resolveTurn) => setTimeout(resolveTurn, 5));
+		}
+		await session.prompt("/continuity");
+		duplicateRelease();
+		await settle();
+		assert.equal(calls("plugin"), 1);
+		assert.equal(calls("assistant"), 1);
+		assert.equal(continuationCount(), beforeDuplicate + 1);
+		assert(notifications.some((notice) => notice.message.includes("already pending")));
+
+		for (const name of ["threshold", "overflow"]) {
+			await session.setModel(faux.getModel());
+			const before = continuationCount();
+			const previous = branchCompaction().id;
+			start(name);
+			await session.prompt(`Exercise host-owned ${name} recovery.`);
+			await settle();
+			assert.equal(calls("plugin"), 1, `${name}: Pi must schedule exactly one compaction`);
+			assert.equal(calls("native"), 0);
+			assert.equal(calls("assistant"), name === "threshold" ? 1 : 2);
+			assert.equal(continuationCount(), before, "automatic paths must not add a plugin continuation");
+			assert.notEqual(branchCompaction().id, previous);
+			assert.equal(branchCompaction().fromHook, true);
+		}
+		console.log(`[${label}] provider-boundary receipt ${JSON.stringify({ hostVersion, sha, boundary: "faux response factory after SDK normalization; not HTTP wire", requests })}`);
+		console.log(`[${label}] PASS at ${sha} (${hostVersion}): packed discovery; commit-before-continue; three rounds and JSONL reload; correction; branch isolation; native gap/fallback success and failure; cancellation/duplicate; threshold/overflow; auth/usage. Faux only; behavioral fidelity unverified.`);
 	} finally {
+		duplicateRelease?.();
 		session?.dispose();
 		faux.unregister();
 	}
