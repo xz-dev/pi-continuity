@@ -45,6 +45,10 @@ Threshold and overflow events use the same extraction:
 
 The extension does not set thresholds, schedule automatic turns, or own retries and queues. Ordinary `/compact` stays native. There are no checkpoint, locking, approval or artifact-state commands.
 
+## Progress display
+
+While extraction runs, the interactive TUI shows a transient widget above the editor: the current phase (preparing evidence, waiting for the model, receiving the summary, validating), elapsed seconds, and request/response size estimates (prompt tokens, then streamed response tokens). Nothing is persisted to the session, the summary, or any file; the widget is removed on every outcome—commit, failure with native fallback, cancellation, and compact-and-retry. Providers or gateways that buffer the whole response simply jump from waiting to the next phase instead of counting up. Print (`-p`) and JSON modes emit nothing.
+
 ## What the summary contains
 
 The semantic state has exactly six fields:

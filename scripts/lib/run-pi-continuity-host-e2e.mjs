@@ -221,11 +221,14 @@ async function linkHostPeers(pluginRoot, hostRoot) {
 	await symlink(join(hostRoot, "packages/coding-agent"), join(scope, "pi-coding-agent"), "dir");
 }
 
-function createNotifier(notifications) {
+function createNotifier(notifications, widgetEvents, phaseRef) {
 	return new Proxy(
 		{
 			notify(message, type = "info") {
 				notifications.push({ message, type });
+			},
+			setWidget(key, lines) {
+				widgetEvents.push({ phase: phaseRef(), key, lines });
 			},
 		},
 		{
@@ -262,6 +265,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 	const settingsManager = SettingsManager.create(project, agentDir);
 	const faux = registerFauxProvider({ models: [{ id: "continuity-e2e", contextWindow: 128000, maxTokens: 16384 }] });
 	const notifications = [];
+	const widgetEvents = [];
 	const requests = [];
 	const callbackFailures = [];
 	const rootConstraint = '只分析，不修改文件。\n  Keep "quoted" user text exactly.';
@@ -381,6 +385,22 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		faux.setResponses(Array.from({ length: 12 }, () => respond));
 	}
 	function calls(kind) { return requests.slice(phaseStart).filter((request) => request.kind === kind).length; }
+	function widgetCalls(name) { return widgetEvents.filter((event) => event.phase === name && event.key === "pi-continuity"); }
+	function assertWidgetLifecycle(name) {
+		const widgets = widgetCalls(name);
+		assert(widgets.length >= 3, `${name}: progress widget lifecycle must be visible`);
+		assert(widgets[0].lines?.[0]?.includes("preparing"), `${name}: first widget shows the preparing phase`);
+		assert(widgets.some((event) => event.lines?.[0]?.includes("waiting for model · prompt ~")), `${name}: awaiting phase shows the prompt size`);
+		assert(widgets.some((event) => event.lines?.[0]?.includes("validating summary")), `${name}: rendering phase is shown`);
+		assert.equal(widgets.at(-1).lines, undefined, `${name}: widget cleared at the end of extraction`);
+		assert.equal(widgets.filter((event) => event.lines === undefined).length, 1, `${name}: exactly one widget clear`);
+	}
+	function assertWidgetCleared(name) {
+		const widgets = widgetCalls(name);
+		assert(widgets.length >= 1, `${name}: progress widget must appear before the outcome`);
+		assert(widgets[0].lines?.[0]?.includes("preparing"), `${name}: first widget shows the preparing phase`);
+		assert.equal(widgets.at(-1).lines, undefined, `${name}: widget cleared at the end of extraction`);
+	}
 	async function settle() {
 		const deadline = Date.now() + 10000;
 		do {
@@ -402,7 +422,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		assert.equal(loaded.extensions.length, 1);
 		assert.equal(resolve(loaded.extensions[0].resolvedPath), resolve(pluginRoot, "extensions/continuity.ts"));
 		({ session } = await createAgentSession({ cwd: project, agentDir, model: faux.getModel(), modelRuntime, resourceLoader, sessionManager: manager, settingsManager, noTools: "all" }));
-		await session.bindExtensions({ uiContext: createNotifier(notifications) });
+		await session.bindExtensions({ uiContext: createNotifier(notifications, widgetEvents, () => phase) });
 	}
 	async function manual(name, quotes = []) {
 		seedUser(`Continue synthetic analysis (${name}); do not use real tools.`);
@@ -418,6 +438,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		const reported = branchCompaction().usage;
 		assert(reported.input > 0 && reported.output > 0, "persist the faux provider's normalized usage, not the factory placeholder");
 		assert.equal(reported.totalTokens, reported.input + reported.output + reported.cacheRead + reported.cacheWrite);
+		assertWidgetLifecycle(name);
 		return branchCompaction();
 	}
 	try {
@@ -468,6 +489,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		await session.compact();
 		await settle();
 		assert.equal(calls("plugin"), 0, "ordinary compact must remain native");
+		assert.equal(widgetCalls("plain-compact").length, 0, "ordinary compact must not show continuity progress");
 		assert(calls("native") >= 1);
 		assert.equal(calls("assistant"), 0);
 		assert.equal(continuationCount(), beforePlain);
@@ -485,6 +507,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			assert.equal(calls("assistant"), 1);
 			assert.notEqual(branchCompaction().fromHook, true);
 			assert.equal(continuationCount(), before + 1);
+			assertWidgetCleared(name);
 		}
 		for (const name of ["native-failure", "cancel"]) {
 			seedUser(`Failure fixture ${name}.`);
@@ -497,6 +520,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			assert.equal(calls("assistant"), 0);
 			assert.equal(continuationCount(), before);
 			assert.equal(branchCompaction().id, previous);
+			assertWidgetCleared(name);
 			if (name === "cancel") assert.equal(calls("native"), 0);
 			else assert(calls("native") >= 1);
 		}
@@ -530,6 +554,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			assert.equal(continuationCount(), before, "automatic paths must not add a plugin continuation");
 			assert.notEqual(branchCompaction().id, previous);
 			assert.equal(branchCompaction().fromHook, true);
+			assertWidgetLifecycle(name);
 		}
 		console.log(`[${label}] provider-boundary receipt ${JSON.stringify({ hostVersion, sha, boundary: "faux response factory after SDK normalization; not HTTP wire", requests })}`);
 		console.log(`[${label}] PASS at ${sha} (${hostVersion}): packed discovery; commit-before-continue; three rounds and JSONL reload; correction; branch isolation; native gap/fallback success and failure; cancellation/duplicate; threshold/overflow; auth/usage. Faux only; behavioral fidelity unverified.`);

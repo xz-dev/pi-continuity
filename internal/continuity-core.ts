@@ -1,8 +1,9 @@
 import { type Usage, uuidv7 } from "@earendil-works/pi-ai";
-import { complete } from "@earendil-works/pi-ai/compat";
+import { stream } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 import { prepareEvidence, reduceSources, renderEvidence, selectEvidence, textTokens, type EvidenceContext, type EvidenceCoverage, type EvidenceReference } from "./continuity-evidence.js";
+import { createProgress, type ContinuityProgress } from "./continuity-progress.js";
 
 const MAX_ITEMS = 128;
 const DEFAULT_RAW_LIMIT = 16 * 16384;
@@ -18,7 +19,7 @@ export interface ContinuitySummary {
 }
 
 export interface ContinuityDependencies {
-	complete: typeof complete;
+	stream: typeof stream;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -148,7 +149,7 @@ interface SynthesisResult {
 	continuity: { version: 1; evidence: EvidenceReference[]; coverage: EvidenceCoverage };
 }
 
-async function synthesize(event: SessionBeforeCompactEvent, ctx: ExtensionContext, completeModel: typeof complete): Promise<SynthesisResult | "cancelled" | undefined> {
+async function synthesize(event: SessionBeforeCompactEvent, ctx: ExtensionContext, streamModel: typeof stream, progress?: ContinuityProgress): Promise<SynthesisResult | "cancelled" | undefined> {
 	if (event.signal.aborted) return "cancelled";
 	if (!ctx.model) return unavailable(ctx, "missing-model");
 	try {
@@ -175,13 +176,20 @@ async function synthesize(event: SessionBeforeCompactEvent, ctx: ExtensionContex
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model).catch(() => undefined);
 		if (event.signal.aborted) return "cancelled";
 		if (!auth?.ok) return unavailable(ctx, "auth-unavailable");
-		const response = await completeModel(ctx.model, {
+		progress?.prepared(textTokens(SUMMARY_SYSTEM_PROMPT) + textTokens(prompt));
+		const events = streamModel(ctx.model, {
 			systemPrompt: SUMMARY_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
 		}, {
 			apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: event.signal,
 			cacheRetention: "none", sessionId: uuidv7(),
 		});
+		for await (const item of events) {
+			progress?.receiving();
+			if (item.type === "text_delta" || item.type === "thinking_delta") progress?.delta(item.delta.length);
+		}
+		const response = await events.result();
+		progress?.rendering();
 		if (event.signal.aborted || response.stopReason === "aborted") return "cancelled";
 		if (response.stopReason === "length") return unavailable(ctx, "incomplete-output");
 		if (response.stopReason !== "stop") return unavailable(ctx, "model-error");
@@ -253,25 +261,44 @@ function renderFiles(files: ReturnType<typeof fileDetails>, budget: number) {
 export function createContinuityExtension(dependencies: ContinuityDependencies) {
 	return function continuityExtension(pi: ExtensionAPI): void {
 		let manualPending: { cancelled: boolean } | undefined;
+		let activeProgress: ContinuityProgress | undefined;
+
+		try {
+			// Backstop for host-side failures after the handler returned; leave() is idempotent.
+			// Typed out of the 0.82 peer floor: pi.on accepts any name at runtime and
+			// hosts without the event simply never invoke it.
+			(pi.on as (event: string, handler: () => void) => void)("session_compact_failed", () => {
+				activeProgress?.leave();
+			});
+		} catch {
+			// The finally path below still guarantees cleanup on hosts without the event.
+		}
 
 		pi.on("session_before_compact", async (event, ctx) => {
 			const request = event.reason === "manual" ? manualPending : undefined;
 			if (event.reason === "manual" && !request) return undefined;
-			const result = await synthesize(event, ctx, dependencies.complete);
-			if (result === "cancelled") {
-				if (request) request.cancelled = true;
-				return event.signal.aborted ? undefined : { cancel: true };
+			const progress = ctx.hasUI ? createProgress(ctx.ui) : undefined;
+			activeProgress = progress;
+			try {
+				const result = await synthesize(event, ctx, dependencies.stream, progress);
+				if (result === "cancelled") {
+					if (request) request.cancelled = true;
+					return event.signal.aborted ? undefined : { cancel: true };
+				}
+				if (!result) return undefined;
+				return {
+					compaction: {
+						summary: result.summary,
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+						usage: result.usage,
+						details: { ...result.files, continuity: result.continuity },
+					},
+				};
+			} finally {
+				progress?.leave();
+				if (activeProgress === progress) activeProgress = undefined;
 			}
-			if (!result) return undefined;
-			return {
-				compaction: {
-					summary: result.summary,
-					firstKeptEntryId: event.preparation.firstKeptEntryId,
-					tokensBefore: event.preparation.tokensBefore,
-					usage: result.usage,
-					details: { ...result.files, continuity: result.continuity },
-				},
-			};
 		});
 
 		pi.registerCommand("continuity", {

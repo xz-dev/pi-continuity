@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { convertToLlm, SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createContinuityExtension, parseSummary, renderSummary, type ContinuitySummary } from "../internal/continuity-core.js";
@@ -50,7 +51,7 @@ function context(compact = vi.fn()) {
 	return {
 		model: { id: "test-model", contextWindow: 128000, maxTokens: 16384 },
 		hasUI: true,
-		ui: { notify: vi.fn() },
+		ui: { notify: vi.fn(), setWidget: vi.fn() },
 		modelRegistry: { getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: undefined }) },
 		compact,
 	};
@@ -60,15 +61,33 @@ function compactCallbacks(ctx: ReturnType<typeof context>) {
 	return ctx.compact.mock.calls[0]?.[0] as { onComplete?: () => void; onError?: (error: Error) => void } | undefined;
 }
 
-function successfulComplete(model: unknown = summary) {
-	return vi.fn().mockResolvedValue({
-		content: [{ type: "text", text: JSON.stringify({ summary: model, quotes: [], retire: [] }) }],
-		stopReason: "stop",
+function streamEvents(text: string, stopReason = "stop") {
+	const events = createAssistantMessageEventStream();
+	events.push({ type: "text_start", contentIndex: 0, partial: undefined } as never);
+	events.push({ type: "text_delta", contentIndex: 0, delta: text, partial: undefined } as never);
+	events.push({ type: "text_end", contentIndex: 0, content: text, partial: undefined } as never);
+	events.end({
+		role: "assistant",
+		content: [{ type: "text", text }],
+		stopReason,
 		usage,
-	});
+		api: "openai-completions",
+		provider: "test",
+		model: "test-model",
+		timestamp: Date.now(),
+	} as never);
+	return events;
 }
 
-function createFakeExtension(complete = successfulComplete()) {
+function fakeStream(text: string, stopReason = "stop") {
+	return vi.fn().mockImplementation(() => streamEvents(text, stopReason));
+}
+
+function successfulStream(model: unknown = summary) {
+	return fakeStream(JSON.stringify({ summary: model, quotes: [], retire: [] }));
+}
+
+function createFakeExtension(stream = successfulStream()) {
 	const handlers = new Map<string, Handler[]>();
 	let command: { handler: (args: string, ctx: any) => Promise<void> } | undefined;
 	const pi = {
@@ -76,7 +95,7 @@ function createFakeExtension(complete = successfulComplete()) {
 		registerCommand: vi.fn((_name: string, value: typeof command) => (command = value)),
 		sendMessage: vi.fn(),
 	};
-	createContinuityExtension({ complete: complete as never })(pi as unknown as ExtensionAPI);
+	createContinuityExtension({ stream: stream as never })(pi as unknown as ExtensionAPI);
 	return { handlers, getCommand: () => command, sendMessage: pi.sendMessage };
 }
 
@@ -114,12 +133,12 @@ describe("host-derived extraction budgets", () => {
 		["long scalar above the old raw ceiling", { ...summary, task: "A complete semantic fact. ".repeat(800).trimEnd() }],
 		["long list item", { ...summary, established: ["Complete observation. ".repeat(80).trimEnd()] }],
 	])("accepts %s within the real safety budget", async (_label, state) => {
-		const complete = successfulComplete(state);
-		const fake = createFakeExtension(complete);
+		const stream = successfulStream(state);
+		const fake = createFakeExtension(stream);
 		const result: any = await before(fake)?.(compactEvent("threshold"), context());
 		expect(result?.compaction).toBeDefined();
 		expect(result.compaction.summary).toContain(renderSummary(state));
-		expect(complete.mock.calls[0]![2]).not.toHaveProperty("maxTokens");
+		expect(stream.mock.calls[0]![2]).not.toHaveProperty("maxTokens");
 	});
 
 	it("uses an aggregate 128-item ceiling rather than independent category ceilings", () => {
@@ -134,56 +153,56 @@ describe("host-derived extraction budgets", () => {
 		[256000, 8192, 4000, "x".repeat(400000), 4000],
 		[16000, 1024, 512, "", 512],
 	])("scales the soft target from host capacities (%s/%s/%s)", async (contextWindow, reserveTokens, maxTokens, previousSummary, target) => {
-		const complete = successfulComplete();
-		const fake = createFakeExtension(complete);
+		const stream = successfulStream();
+		const fake = createFakeExtension(stream);
 		const ctx = { ...context(), model: { id: "test-model", contextWindow, maxTokens } };
 		const event = compactEvent("threshold");
 		event.preparation.settings.reserveTokens = reserveTokens;
 		(event.preparation as any).previousSummary = previousSummary;
 		await before(fake)?.(event, ctx);
-		expect(complete).toHaveBeenCalledOnce();
-		const prompt = (complete.mock.calls[0]![1] as any).messages[0].content[0].text;
+		expect(stream).toHaveBeenCalledOnce();
+		const prompt = (stream.mock.calls[0]![1] as any).messages[0].content[0].text;
 		const line = prompt.split("\n").find((line: string) => line.startsWith("Budget: "));
 		expect(line).toBeDefined();
 		const budget = JSON.parse(line.slice("Budget: ".length));
 		expect(budget.responseTarget).toBe(target);
 		expect(budget.renderLimit).toBe(Math.min(contextWindow, reserveTokens));
 		expect(budget.rawTextLimit).toBe(16 * Math.min(contextWindow, reserveTokens));
-		expect(complete.mock.calls[0]![2]).not.toHaveProperty("maxTokens");
+		expect(stream.mock.calls[0]![2]).not.toHaveProperty("maxTokens");
 	});
 
 	it.each([0, -1, NaN, Infinity, 1.5])("makes no extraction request for invalid context capacity %s", async (contextWindow) => {
-		const complete = successfulComplete();
-		const fake = createFakeExtension(complete);
+		const stream = successfulStream();
+		const fake = createFakeExtension(stream);
 		const ctx = { ...context(), model: { ...context().model, contextWindow } };
 		expect(await before(fake)?.(compactEvent("threshold"), ctx)).toBeUndefined();
-		expect(complete).not.toHaveBeenCalled();
+		expect(stream).not.toHaveBeenCalled();
 		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("input-budget"), "warning");
 	});
 
 	it("falls back before extraction when the base input cannot fit with output headroom", async () => {
-		const complete = successfulComplete();
-		const fake = createFakeExtension(complete);
+		const stream = successfulStream();
+		const fake = createFakeExtension(stream);
 		const ctx = { ...context(), model: { id: "test-model", contextWindow: 4096, maxTokens: 512 } };
 		expect(await before(fake)?.(compactEvent("threshold"), ctx)).toBeUndefined();
-		expect(complete).not.toHaveBeenCalled();
+		expect(stream).not.toHaveBeenCalled();
 		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("input-budget"), "warning");
 	});
 
 	it("shrinks only the offered catalogue, retaining the prepared history", async () => {
-		const complete = successfulComplete();
-		const fake = createFakeExtension(complete);
+		const stream = successfulStream();
+		const fake = createFakeExtension(stream);
 		const ctx = { ...context(), model: { id: "test-model", contextWindow: 5800, maxTokens: 256 } };
 		const event: any = compactEvent("threshold");
 		event.preparation.settings.reserveTokens = 512;
 		event.branchEntries[0].message.content = "u".repeat(4000);
 		event.preparation.messagesToSummarize = [{ role: "user", content: "Important prepared history must remain intact.", timestamp: 0 }];
 		const result: any = await before(fake)?.(event, ctx);
-		expect(complete).toHaveBeenCalledOnce();
+		expect(stream).toHaveBeenCalledOnce();
 		expect(result?.compaction).toBeDefined();
 		expect(result.compaction.details.continuity.coverage.sourceWindowsOmitted).toBe(1);
 		expect(result.compaction.details.continuity.coverage.sourceCharsOmitted).toBe(4000);
-		const input = complete.mock.calls[0]![1] as any;
+		const input = stream.mock.calls[0]![1] as any;
 		const prompt = input.messages[0].content[0].text;
 		expect(prompt).toContain("Important prepared history must remain intact.");
 		expect(prompt).not.toContain("u".repeat(4000));
@@ -191,50 +210,50 @@ describe("host-derived extraction budgets", () => {
 	});
 
 	it.each([0, NaN, Infinity, undefined])("rejects missing/invalid reserve capacity %s before extraction", async (reserveTokens) => {
-		const complete = successfulComplete();
-		const fake = createFakeExtension(complete);
+		const stream = successfulStream();
+		const fake = createFakeExtension(stream);
 		const event: any = compactEvent("threshold");
 		event.preparation.settings.reserveTokens = reserveTokens;
 		expect(await before(fake)?.(event, context())).toBeUndefined();
-		expect(complete).not.toHaveBeenCalled();
+		expect(stream).not.toHaveBeenCalled();
 	});
 
 	it("uses R when the model output capacity is unknown", async () => {
-		const complete = successfulComplete();
-		const fake = createFakeExtension(complete);
+		const stream = successfulStream();
+		const fake = createFakeExtension(stream);
 		const event = compactEvent("threshold");
 		event.preparation.settings.reserveTokens = 1024;
 		await before(fake)?.(event, { ...context(), model: { id: "test-model", contextWindow: 128000 } });
-		const line = (complete.mock.calls[0]![1] as any).messages[0].content[0].text.split("\n").find((line: string) => line.startsWith("Budget: "));
+		const line = (stream.mock.calls[0]![1] as any).messages[0].content[0].text.split("\n").find((line: string) => line.startsWith("Budget: "));
 		expect(JSON.parse(line.slice(8))).toEqual(expect.objectContaining({ generationAllowance: 1024, responseTarget: 1024 }));
 	});
 
 	it("checks the complete raw response before removing outer whitespace", async () => {
-		const complete = vi.fn().mockResolvedValue({ content: [{ type: "text", text: JSON.stringify({ summary, quotes: [], retire: [] }) + " ".repeat(9000) }], stopReason: "stop", usage });
-		const fake = createFakeExtension(complete);
+		const stream = fakeStream(JSON.stringify({ summary, quotes: [], retire: [] }) + " ".repeat(9000));
+		const fake = createFakeExtension(stream);
 		const event = compactEvent("threshold");
 		event.preparation.settings.reserveTokens = 512;
 		const ctx = context();
 		expect(await before(fake)?.(event, ctx)).toBeUndefined();
-		expect(complete).toHaveBeenCalledOnce();
+		expect(stream).toHaveBeenCalledOnce();
 		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("semantic-budget"), "warning");
 	});
 
 	it("rejects semantic overflow rather than truncating a list to fit R", async () => {
 		const state = { ...summary, open: Array.from({ length: 50 }, (_, i) => `${i}: ${"x".repeat(70)}`) };
-		const complete = successfulComplete(state);
-		const fake = createFakeExtension(complete);
+		const stream = successfulStream(state);
+		const fake = createFakeExtension(stream);
 		const event = compactEvent("threshold");
 		event.preparation.settings.reserveTokens = 512;
 		const ctx = context();
 		expect(await before(fake)?.(event, ctx)).toBeUndefined();
-		expect(complete).toHaveBeenCalledOnce();
+		expect(stream).toHaveBeenCalledOnce();
 		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("semantic-budget"), "warning");
 	});
 
 	it("preserves valid semantics when a proposal array exceeds its 32-record ceiling", async () => {
-		const complete = vi.fn().mockResolvedValue({ content: [{ type: "text", text: JSON.stringify({ summary, quotes: Array.from({ length: 33 }, () => ({ sourceId: "s0", quote: "Keep", kind: "task" })), retire: [] }) }], stopReason: "stop", usage });
-		const fake = createFakeExtension(complete);
+		const stream = fakeStream(JSON.stringify({ summary, quotes: Array.from({ length: 33 }, () => ({ sourceId: "s0", quote: "Keep", kind: "task" })), retire: [] }));
+		const fake = createFakeExtension(stream);
 		const result: any = await before(fake)?.(compactEvent("threshold"), context());
 		expect(result.compaction.summary).toContain(renderSummary(summary));
 		expect(result.compaction.details.continuity.coverage.selectionsRejected).toBe(33);
@@ -242,17 +261,17 @@ describe("host-derived extraction budgets", () => {
 	});
 
 	it.each(["empty", "length"])("does not commit, repair, or retry %s output", async (kind) => {
-		const complete = vi.fn().mockResolvedValue({ content: [{ type: "text", text: kind === "empty" ? " " : JSON.stringify({ summary, quotes: [], retire: [] }) }], stopReason: kind === "length" ? "length" : "stop", usage });
-		const fake = createFakeExtension(complete);
+		const stream = fakeStream(kind === "empty" ? " " : JSON.stringify({ summary, quotes: [], retire: [] }), kind === "length" ? "length" : "stop");
+		const fake = createFakeExtension(stream);
 		expect(await before(fake)?.(compactEvent("threshold"), context())).toBeUndefined();
-		expect(complete).toHaveBeenCalledOnce();
+		expect(stream).toHaveBeenCalledOnce();
 	});
 });
 
 describe("extraction prompt and failure contract", () => {
 	it.each([false, true])("captures %s update mode, split prefix, final focus and only filters its own custom messages", async (update) => {
-		const complete = successfulComplete();
-		const fake = createFakeExtension(complete);
+		const stream = successfulStream();
+		const fake = createFakeExtension(stream);
 		const event: any = compactEvent("threshold");
 		const genuine = "Continue the work represented by the just-committed continuity summary.";
 		event.preparation.previousSummary = update ? "Prior request is still awaiting an answer." : undefined;
@@ -267,7 +286,7 @@ describe("extraction prompt and failure contract", () => {
 		];
 		event.customInstructions = "Focus on the pending approval.";
 		await before(fake)?.(event, context());
-		const input = complete.mock.calls[0]![1] as any;
+		const input = stream.mock.calls[0]![1] as any;
 		const prompt = input.messages[0].content[0].text as string;
 		expect(prompt.startsWith(update ? "Update the prior" : "Build an initial")).toBe(true);
 		expect(prompt.split(genuine)).toHaveLength(3);
@@ -282,46 +301,45 @@ describe("extraction prompt and failure contract", () => {
 
 	it("accepts an explicitly resolved state without inventing a next action", async () => {
 		const state = { task: "No active request remains.", doneWhen: "All requests have been answered.", constraints: [], established: ["The requested comparison was supplied."], open: [], next: [] };
-		const fake = createFakeExtension(successfulComplete(state));
+		const fake = createFakeExtension(successfulStream(state));
 		const result: any = await before(fake)?.(compactEvent("threshold"), context());
 		expect(result.compaction.summary).toContain(renderSummary(state));
 		expect(fake.sendMessage).not.toHaveBeenCalled();
 	});
 
 	it("retains auth, routing-related headers/env, signal and cache options without a plugin output cap", async () => {
-		const complete = successfulComplete();
-		const fake = createFakeExtension(complete);
+		const stream = successfulStream();
+		const fake = createFakeExtension(stream);
 		const ctx = context();
 		ctx.modelRegistry.getApiKeyAndHeaders.mockResolvedValue({ ok: true, apiKey: "synthetic-key", headers: { "x-route": "synthetic-route" }, env: { TEST_PROVIDER_ORIGIN: "https://example.invalid" } });
 		const event = compactEvent("threshold");
 		await before(fake)?.(event, ctx);
-		expect(complete.mock.calls[0]![0]).toBe(ctx.model);
-		expect(complete.mock.calls[0]![2]).toEqual(expect.objectContaining({ apiKey: "synthetic-key", headers: { "x-route": "synthetic-route" }, env: { TEST_PROVIDER_ORIGIN: "https://example.invalid" }, signal: event.signal, cacheRetention: "none", sessionId: expect.any(String) }));
-		expect(complete.mock.calls[0]![2]).not.toHaveProperty("maxTokens");
+		expect(stream.mock.calls[0]![0]).toBe(ctx.model);
+		expect(stream.mock.calls[0]![2]).toEqual(expect.objectContaining({ apiKey: "synthetic-key", headers: { "x-route": "synthetic-route" }, env: { TEST_PROVIDER_ORIGIN: "https://example.invalid" }, signal: event.signal, cacheRetention: "none", sessionId: expect.any(String) }));
+		expect(stream.mock.calls[0]![2]).not.toHaveProperty("maxTokens");
 	});
 
 	it.each(["missing-model", "auth-unavailable", "model-error", "empty-output", "incomplete-output", "invalid-json", "invalid-schema", "invalid-boundary", "input-budget", "semantic-budget"])("permits native fallback for %s, but continues only on a successful host callback", async (reason) => {
-		const complete = successfulComplete();
+		const stream = successfulStream();
 		const ctx: any = context();
 		const event: any = compactEvent();
-		const raw = (text: string, stopReason = "stop") => ({ content: [{ type: "text", text }], stopReason, usage });
 		if (reason === "missing-model") ctx.model = undefined;
 		else if (reason === "auth-unavailable") ctx.modelRegistry.getApiKeyAndHeaders.mockRejectedValue(new Error("synthetic confidential auth error"));
-		else if (reason === "model-error") complete.mockRejectedValue(new Error("synthetic confidential provider error"));
-		else if (reason === "empty-output") complete.mockResolvedValue(raw(" "));
-		else if (reason === "incomplete-output") complete.mockResolvedValue(raw('{"summary":', "length"));
-		else if (reason === "invalid-json") complete.mockResolvedValue(raw("synthetic confidential invalid output"));
-		else if (reason === "invalid-schema") complete.mockResolvedValue(raw(JSON.stringify({ summary, quotes: [], retire: [], unexpected: true })));
+		else if (reason === "model-error") stream.mockImplementation(() => { throw new Error("synthetic confidential provider error"); });
+		else if (reason === "empty-output") stream.mockImplementation(() => streamEvents(" "));
+		else if (reason === "incomplete-output") stream.mockImplementation(() => streamEvents('{"summary":', "length"));
+		else if (reason === "invalid-json") stream.mockImplementation(() => streamEvents("synthetic confidential invalid output"));
+		else if (reason === "invalid-schema") stream.mockImplementation(() => streamEvents(JSON.stringify({ summary, quotes: [], retire: [], unexpected: true })));
 		else if (reason === "invalid-boundary") event.preparation.firstKeptEntryId = "absent";
 		else if (reason === "input-budget") ctx.model.contextWindow = 0;
 		else { event.preparation.settings.reserveTokens = 64; }
-		const fake = createFakeExtension(complete);
+		const fake = createFakeExtension(stream);
 		await requestContinuity(fake, ctx);
 		expect(await before(fake)?.(event, ctx)).toBeUndefined();
 		expect(fake.sendMessage).not.toHaveBeenCalled();
 		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining(reason), "warning");
 		expect(JSON.stringify(ctx.ui.notify.mock.calls)).not.toContain("confidential");
-		expect(complete.mock.calls.length).toBeLessThanOrEqual(1);
+		expect(stream.mock.calls.length).toBeLessThanOrEqual(1);
 		compactCallbacks(ctx)?.onComplete?.();
 		compactCallbacks(ctx)?.onComplete?.();
 		expect(fake.sendMessage).toHaveBeenCalledOnce();
@@ -330,7 +348,7 @@ describe("extraction prompt and failure contract", () => {
 	it("uses a single bounded headless diagnostic, never provider text or chat", async () => {
 		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 		try {
-			const fake = createFakeExtension(vi.fn().mockRejectedValue(new Error("DO-NOT-LOG-THIS-SECRET")));
+			const fake = createFakeExtension(vi.fn().mockImplementation(() => { throw new Error("DO-NOT-LOG-THIS-SECRET"); }));
 			await before(fake)?.(compactEvent("threshold"), { ...context(), hasUI: false });
 			expect(stderr).toHaveBeenCalledOnce();
 			expect(String(stderr.mock.calls[0]![0])).toContain("model-error");
@@ -403,7 +421,7 @@ describe("manual /continuity", () => {
 	});
 
 	it("fails open to native manual compaction while the successful callback continues once", async () => {
-		const fake = createFakeExtension(successfulComplete({ ...summary, extra: true }));
+		const fake = createFakeExtension(successfulStream({ ...summary, extra: true }));
 		const ctx = context();
 		await requestContinuity(fake, ctx);
 		expect(await before(fake)?.(compactEvent(), ctx)).toBeUndefined();
@@ -412,8 +430,8 @@ describe("manual /continuity", () => {
 	});
 
 	it.each(["host-signal", "provider-aborted"])("never continues a cancelled %s request even on a late success callback", async (kind) => {
-		const complete = kind === "host-signal" ? successfulComplete() : vi.fn().mockResolvedValue({ content: [], stopReason: "aborted", usage });
-		const fake = createFakeExtension(complete);
+		const stream = kind === "host-signal" ? successfulStream() : fakeStream("", "aborted");
+		const fake = createFakeExtension(stream);
 		const ctx = context();
 		await requestContinuity(fake, ctx);
 		await before(fake)?.(compactEvent("manual", kind === "host-signal" ? AbortSignal.abort() : new AbortController().signal), ctx);
@@ -465,17 +483,14 @@ describe("Pi-scheduled compaction", () => {
 
 describe("source-backed continuation context", () => {
 	it("rejects a fabricated quotation without discarding valid semantic output", async () => {
-		const complete = vi.fn().mockResolvedValue({
-			content: [{ type: "text", text: JSON.stringify({ summary, quotes: [{ sourceId: "s0", quote: "可以部署", kind: "constraint" }], retire: [] }) }],
-			stopReason: "stop", usage,
-		});
-		const fake = createFakeExtension(complete);
+		const stream = fakeStream(JSON.stringify({ summary, quotes: [{ sourceId: "s0", quote: "可以部署", kind: "constraint" }], retire: [] }));
+		const fake = createFakeExtension(stream);
 		const result: any = await before(fake)?.(compactEvent("threshold"), context());
 		expect(result.compaction.summary).toContain(renderSummary(summary));
 		expect(result.compaction.usage).toEqual(usage);
 		expect(result.compaction.details.continuity.evidence).toEqual([]);
 		expect(result.compaction.details.continuity.coverage.selectionsRejected).toBe(1);
-		expect(complete).toHaveBeenCalledOnce();
+		expect(stream).toHaveBeenCalledOnce();
 		expect(fake.sendMessage).not.toHaveBeenCalled();
 	});
 
@@ -487,16 +502,13 @@ describe("source-backed continuation context", () => {
 			role: "user", content: [{ type: "image", data: "", mimeType: "image/png" }, { type: "text", text: sourceText }], timestamp: 1,
 		});
 		const keptId = session.appendMessage({ role: "user", content: "继续分析", timestamp: 2 });
-		const complete = vi.fn().mockImplementation(async (_model, input) => {
+		const stream = vi.fn().mockImplementation((_model: unknown, input: any) => {
 			const prompt = input.messages[0].content[0].text as string;
 			const offered = prompt.split("\n").filter((line) => line.startsWith('{"sourceId":')).map((line) => JSON.parse(line))
 				.find((source) => source.text.includes(original));
-			return {
-				content: [{ type: "text", text: JSON.stringify({ summary, quotes: [{ sourceId: offered?.sourceId ?? "not-offered", quote: original, kind: "constraint" }], retire: [] }) }],
-				stopReason: "stop", usage,
-			};
+			return streamEvents(JSON.stringify({ summary, quotes: [{ sourceId: offered?.sourceId ?? "not-offered", quote: original, kind: "constraint" }], retire: [] }));
 		});
-		const fake = createFakeExtension(complete);
+		const fake = createFakeExtension(stream);
 		const event: any = compactEvent("threshold");
 		event.branchEntries = session.getBranch();
 		event.preparation.firstKeptEntryId = keptId;
@@ -539,14 +551,14 @@ describe("persisted evidence across compactions", () => {
 
 	async function compact(session: SessionManager, choose: (sources: any[], carried: any[]) => { quotes: unknown[]; retire: unknown[] } = () => ({ quotes: [], retire: [] }), state = summary, ops?: ReturnType<typeof compactEvent>["preparation"]["fileOps"]) {
 		const kept = session.appendMessage({ role: "user", content: "Continue the analysis without making changes.", timestamp: Date.now() });
-		const complete = vi.fn().mockImplementation(async (_model, input) => {
+		const stream = vi.fn().mockImplementation((_model: unknown, input: any) => {
 			const lines = (input.messages[0].content[0].text as string).split("\n");
 			const sources = lines.filter((line) => line.startsWith('{"sourceId":')).map((line) => JSON.parse(line));
 			const carried = lines.filter((line) => line.startsWith('{"id":')).map((line) => JSON.parse(line));
-			return { content: [{ type: "text", text: JSON.stringify({ summary: state, ...choose(sources, carried) }) }], stopReason: "stop", usage };
+			return streamEvents(JSON.stringify({ summary: state, ...choose(sources, carried) }));
 		});
 		// A fresh extension instance for every round rules out process-local carry state.
-		const fake = createFakeExtension(complete);
+		const fake = createFakeExtension(stream);
 		const event: any = compactEvent("threshold");
 		event.branchEntries = session.getBranch();
 		event.preparation.firstKeptEntryId = kept;
@@ -589,11 +601,11 @@ describe("persisted evidence across compactions", () => {
 		const session = await persisted(original);
 		const kept = session.appendMessage({ role: "user", content: "Continue the analysis.", timestamp: 3 });
 		const paths = Array.from({ length: 80 }, (_, i) => `src/${String(i).padStart(3, "0")}-${"path".repeat(16)}.ts`);
-		const complete = vi.fn().mockImplementation(async (_model, input) => {
+		const stream = vi.fn().mockImplementation((_model: unknown, input: any) => {
 			const sources = (input.messages[0].content[0].text as string).split("\n").filter((line) => line.startsWith('{"sourceId":')).map((line) => JSON.parse(line));
-			return { content: [{ type: "text", text: JSON.stringify({ summary, quotes: [{ sourceId: sources.find((source) => source.text === original).sourceId, quote: original, kind: "constraint" }], retire: [] }) }], stopReason: "stop", usage };
+			return streamEvents(JSON.stringify({ summary, quotes: [{ sourceId: sources.find((source) => source.text === original).sourceId, quote: original, kind: "constraint" }], retire: [] }));
 		});
-		const fake = createFakeExtension(complete);
+		const fake = createFakeExtension(stream);
 		const event: any = compactEvent("threshold");
 		event.branchEntries = session.getBranch();
 		event.preparation.firstKeptEntryId = kept;
@@ -918,10 +930,87 @@ describe("original source validation", () => {
 	});
 });
 
+describe("extraction progress", () => {
+	it("shows the phase sequence in interactive mode and always ends cleared", async () => {
+		const fake = createFakeExtension();
+		const ctx = context();
+		const result: any = await before(fake)?.(compactEvent("threshold"), ctx);
+		expect(result?.compaction).toBeDefined();
+		const calls = ctx.ui.setWidget.mock.calls;
+		const lines = calls.map((call) => call[1]?.[0]);
+		expect(lines[0]).toContain("preparing");
+		expect(lines).toContainEqual(expect.stringMatching(/waiting for model · prompt ~/));
+		expect(lines).toContainEqual(expect.stringMatching(/receiving summary · ~/));
+		expect(lines).toContainEqual(expect.stringContaining("validating summary"));
+		expect(calls.at(-1)).toEqual(["pi-continuity", undefined]);
+		expect(calls.filter((call) => call[1] === undefined)).toHaveLength(1);
+	});
+
+	it("emits no widget updates without a UI", async () => {
+		const fake = createFakeExtension();
+		const ctx = { ...context(), hasUI: false };
+		const result: any = await before(fake)?.(compactEvent("threshold"), ctx);
+		expect(result?.compaction).toBeDefined();
+		expect(ctx.ui.setWidget).not.toHaveBeenCalled();
+	});
+
+	it("clears progress on extraction failure", async () => {
+		const fake = createFakeExtension(fakeStream(" "));
+		const ctx = context();
+		expect(await before(fake)?.(compactEvent("threshold"), ctx)).toBeUndefined();
+		expect(ctx.ui.setWidget.mock.calls.at(-1)).toEqual(["pi-continuity", undefined]);
+		expect(ctx.ui.setWidget.mock.calls.filter((call) => call[1] === undefined)).toHaveLength(1);
+	});
+
+	it("clears progress on user cancellation", async () => {
+		const fake = createFakeExtension();
+		const ctx = context();
+		await before(fake)?.(compactEvent("threshold", AbortSignal.abort()), ctx);
+		expect(ctx.ui.setWidget.mock.calls.at(-1)).toEqual(["pi-continuity", undefined]);
+	});
+
+	it("clears an in-flight extraction through the session_compact_failed backstop exactly once", async () => {
+		const events = createAssistantMessageEventStream();
+		const fake = createFakeExtension(vi.fn().mockImplementation(() => events));
+		const ctx = context();
+		const pending = before(fake)?.(compactEvent("threshold"), ctx) as Promise<unknown>;
+		await vi.waitFor(() => expect(ctx.ui.setWidget).toHaveBeenCalledWith("pi-continuity", [expect.stringContaining("waiting for model")]));
+		fake.handlers.get("session_compact_failed")?.[0]?.({ reason: "overflow" }, ctx);
+		expect(ctx.ui.setWidget.mock.calls.at(-1)).toEqual(["pi-continuity", undefined]);
+		events.end({ role: "assistant", content: [{ type: "text", text: JSON.stringify({ summary, quotes: [], retire: [] }) }], stopReason: "stop", usage, api: "openai-completions", provider: "test", model: "test-model", timestamp: Date.now() } as never);
+		await pending;
+		expect(ctx.ui.setWidget.mock.calls.filter((call) => call[1] === undefined)).toHaveLength(1);
+	});
+});
+
+describe("stream stop-reason parity", () => {
+	it("maps a provider abort to the cancelled path", async () => {
+		const fake = createFakeExtension(fakeStream("", "aborted"));
+		expect(await before(fake)?.(compactEvent("threshold"), context())).toEqual({ cancel: true });
+	});
+
+	it("maps length to incomplete-output and error to model-error", async () => {
+		const truncated = createFakeExtension(fakeStream('{"summary":', "length"));
+		const ctxLength = context();
+		expect(await before(truncated)?.(compactEvent("threshold"), ctxLength)).toBeUndefined();
+		expect(ctxLength.ui.notify).toHaveBeenCalledWith(expect.stringContaining("incomplete-output"), "warning");
+		const errored = createFakeExtension(fakeStream("", "error"));
+		const ctxError = context();
+		expect(await before(errored)?.(compactEvent("threshold"), ctxError)).toBeUndefined();
+		expect(ctxError.ui.notify).toHaveBeenCalledWith(expect.stringContaining("model-error"), "warning");
+	});
+
+	it("reports usage from the stream's final message", async () => {
+		const fake = createFakeExtension();
+		const result: any = await before(fake)?.(compactEvent("threshold"), context());
+		expect(result.compaction.usage).toEqual(usage);
+	});
+});
+
 describe("public surface", () => {
 	it("registers one command and no legacy controls or lifecycle state handlers", async () => {
 		const fake = createFakeExtension();
-		expect([...fake.handlers.keys()].sort()).toEqual(["session_before_compact"]);
+		expect([...fake.handlers.keys()].sort()).toEqual(["session_before_compact", "session_compact_failed"]);
 		const notify = vi.fn();
 		await fake.getCommand()?.handler("status", { ...context(), ui: { notify } });
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("Usage: /continuity"), "warning");
