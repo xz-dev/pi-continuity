@@ -26,12 +26,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Pin hosts to revisions with passing offline builds; upstream main is currently
+        # red in its own Google FinishReason switch before plugin tests can start.
         include:
           - host: xz-dev/pi
-            source: https://github.com/xz-dev/pi.git
+            sha: e88a9b4b9a26d73042defa261ab486d7c4e15093
             script: test:e2e:xz-dev-pi
           - host: earendil-works/pi
-            source: https://github.com/earendil-works/pi.git
+            sha: b2602be77cb7b0de45dd616407fd210daa48aa75
             script: test:e2e:upstream-pi
     steps:
       - uses: actions/checkout@v4
@@ -39,20 +41,12 @@ jobs:
         with:
           node-version: 22.19.0
           cache: npm
-      - name: Resolve exact host SHA
-        id: host
-        env:
-          E2E_HOST_SOURCE: ${{ matrix.source }}
-        run: |
-          sha="$(git ls-remote --refs "$E2E_HOST_SOURCE" refs/heads/main | awk 'NR == 1 { print $1 }')"
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Could not resolve exact host SHA" >&2; exit 1; }
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
           path: ~/.cache/pi-continuity-e2e/hosts
-          key: pi-continuity-e2e-${{ runner.os }}-${{ runner.arch }}-node22-recipe4-${{ matrix.host }}-${{ steps.host.outputs.sha }}
+          key: pi-continuity-e2e-${{ runner.os }}-${{ runner.arch }}-node22-recipe4-${{ matrix.host }}-${{ matrix.sha }}
       - run: npm ci
       - run: npm run ${{ matrix.script }}
         env:
-          E2E_HOST_SHA: ${{ steps.host.outputs.sha }}
+          E2E_HOST_SHA: ${{ matrix.sha }}
           E2E_HOST_CACHE_RECIPE: "4"
