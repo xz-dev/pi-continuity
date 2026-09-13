@@ -30,11 +30,14 @@ pi update --extensions
 
 ```text
 /continuity
+/continuity continue
 ```
 
-No arguments are supported. Pi's manual compaction flow aborts and settles active work, as its built-in `/compact` does. After a successful continuity or native-fallback commit, the session waits for the user's next input; the extension does not enqueue a hidden continuation message or start an assistant turn. Pending duplicate commands do not create another compaction; stale callbacks cannot complete a later request.
+`/continuity` remains compact-only. Pi's manual compaction flow aborts and settles active work, as its built-in `/compact` does. After a successful continuity or native-fallback commit, the session waits for the user's next input; retained `Open` or `Next` state does not authorize an assistant turn.
 
-A failed or cancelled compaction does not start an assistant turn. A successful **native fallback** commit does not mean source-verified continuity succeeded, and it also does not authorize the extension to resume the old task.
+`/continuity continue` explicitly opts into the earlier compact-and-resume workflow. After the continuity summary or a native fallback commits, the extension appends one hidden continuation message and starts one assistant turn from the committed context. This starts a turn; it does not override retained constraints or grant approval for actions that still require confirmation.
+
+No other arguments are supported; invalid input reports `Usage: /continuity [continue]` without starting compaction. Pending duplicate commands do not create another compaction, stale callbacks cannot complete a later request, and repeated completion notifications start at most one turn. A failed or cancelled compaction never starts an assistant turn. Native fallback is not source-verified even when the explicit mode continues afterward.
 
 ### Pi-scheduled automatic compaction
 
@@ -43,7 +46,7 @@ Threshold and overflow events use the same extraction:
 - **Threshold:** Pi decides when to compact and whether queued work continues.
 - **Overflow:** Pi owns compact-and-retry behavior.
 
-The extension does not set thresholds, schedule automatic turns, or own retries and queues. Ordinary `/compact` stays native. There are no checkpoint, locking, approval or artifact-state commands.
+The extension does not set thresholds or own automatic retries and queues. Ordinary `/compact` stays native. Only explicit `/continuity continue` schedules an extension-started turn; there are no checkpoint, locking, approval or artifact-state commands.
 
 ## Progress display
 
@@ -142,7 +145,7 @@ Mechanically verified host revisions:
 | `earendil-works/pi` | 0.85.1 | `b2602be77cb7b0de45dd616407fd210daa48aa75` |
 | `xz-dev/pi` | 0.85.1 | `e88a9b4b9a26d73042defa261ab486d7c4e15093` |
 
-The scenarios cover compact-only manual behavior, explicit user-request context after commit, three compactions and fresh-extension JSONL reload, exact evidence and files in later user-request context, corrections, sibling isolation, native-gap reconstruction, native fallback success/failure, cancellation, duplicate commands, auth/usage, and automatic ownership. Each host run has a host-specific faux request receipt; at the **faux response factory after SDK normalization**, plugin requests have no `maxTokens` value and native requests have `13107`; this is not an HTTP-wire measurement or a statement about every provider. The threshold fixture changes the model window after the host's pre-prompt check to exercise scheduling; it is not a live capacity benchmark.
+The scenarios cover default compact-only and explicit compact-and-continue manual behavior, explicit user-request context after default commits, commit-before-continuation ordering, three compactions and fresh-extension JSONL reload, exact evidence and files in later model context, corrections, sibling isolation, native-gap reconstruction, mode-specific native fallback success/failure, cancellation, duplicate commands, auth/usage, and automatic ownership. Each host run has a host-specific faux request receipt; at the **faux response factory after SDK normalization**, plugin requests have no `maxTokens` value and native requests have `13107`; this is not an HTTP-wire measurement or a statement about every provider. The threshold fixture changes the model window after the host's pre-prompt check to exercise scheduling; it is not a live capacity benchmark.
 
 The [synthetic corpus](tests/fixtures/README.md) defines nine histories, expected source/state annotations and next-action outcomes after at least three compactions and reload. Deterministic tests validate its structure, not model choices. **Real-model semantic fidelity and the baseline/candidate/Hermes behavioral comparison have not been verified.** They require separately approved model access, data and cost. Wrong continuation behavior fails that evaluation even when source copying, JSON validation and persistence pass.
 
