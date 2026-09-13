@@ -1,0 +1,64 @@
+
+> pi-continuity@0.2.0 test:e2e:upstream-pi
+> node scripts/e2e-earendil-works-pi.mjs
+
+[earendil-works/pi] using pre-resolved host SHA b2602be77cb7b0de45dd616407fd210daa48aa75
+[earendil-works/pi] reusing validated host cache /home/xz/.cache/pi-continuity-e2e/hosts/earendil-works--pi/recipe-4-node-26-linux-x64/b2602be77cb7b0de45dd616407fd210daa48aa75
+$ npm pack --json --pack-destination /home/xz/.cache/pi-continuity-e2e/run-d2Naau/pack
+[
+  {
+    "id": "pi-continuity@0.2.0",
+    "name": "pi-continuity",
+    "version": "0.2.0",
+    "size": 17013,
+    "unpackedSize": 50209,
+    "shasum": "b4eafbffd955f0bf209fd62fb4a6476c501a8ed1",
+    "integrity": "sha512-t1/7Gxfha7M5/fOXYpKkY8cRi9LJjyFpo4sTnowpXhvI6Kjzrl3o2NPvRssBaiSzjx+9ti0+UB4e1dFGHKXDiQ==",
+    "filename": "pi-continuity-0.2.0.tgz",
+    "files": [
+      {
+        "path": "LICENSE",
+        "size": 1065,
+        "mode": 420
+      },
+      {
+        "path": "README.md",
+        "size": 14501,
+        "mode": 420
+      },
+      {
+        "path": "extensions/continuity.ts",
+        "size": 188,
+        "mode": 420
+      },
+      {
+        "path": "internal/continuity-core.ts",
+        "size": 17773,
+        "mode": 420
+      },
+      {
+        "path": "internal/continuity-evidence.ts",
+        "size": 11984,
+        "mode": 420
+      },
+      {
+        "path": "internal/continuity-progress.ts",
+        "size": 3488,
+        "mode": 420
+      },
+      {
+        "path": "package.json",
+        "size": 1210,
+        "mode": 420
+      }
+    ],
+    "entryCount": 7,
+    "bundled": []
+  }
+]
+  completed in 0.2s
+$ tar -xzf /home/xz/.cache/pi-continuity-e2e/run-d2Naau/pack/pi-continuity-0.2.0.tgz -C /home/xz/.cache/pi-continuity-e2e/run-d2Naau/plugin
+  completed in 0.0s
+[earendil-works/pi] provider-boundary receipt {"hostVersion":"0.85.1","sha":"b2602be77cb7b0de45dd616407fd210daa48aa75","boundary":"faux response factory after SDK normalization; not HTTP wire","requests":[{"phase":"initial","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"explicit-new-task","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"omitted-round-2","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"omitted-round-2-explicit-task","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"omitted-round-3","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"omitted-round-3-explicit-task","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"correction","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"correction-explicit-task","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"sibling","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"sibling-explicit-task","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"isolated","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"isolated-explicit-task","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"plain-compact","kind":"native","maxTokens":13107,"modelMaxTokens":16384,"stop":"stop"},{"phase":"rebuilt","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"rebuilt-explicit-task","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"invalid-json","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"invalid-json","kind":"native","maxTokens":13107,"modelMaxTokens":16384,"stop":"stop"},{"phase":"invalid-json-explicit-task","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"empty","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"empty","kind":"native","maxTokens":13107,"modelMaxTokens":16384,"stop":"stop"},{"phase":"empty-explicit-task","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"truncated","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"length"},{"phase":"truncated","kind":"native","maxTokens":13107,"modelMaxTokens":16384,"stop":"stop"},{"phase":"truncated-explicit-task","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"provider-error","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"error"},{"phase":"provider-error","kind":"native","maxTokens":13107,"modelMaxTokens":16384,"stop":"stop"},{"phase":"provider-error-explicit-task","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"native-failure","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"native-failure","kind":"native","maxTokens":13107,"modelMaxTokens":16384,"stop":"error"},{"phase":"cancel","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"aborted"},{"phase":"duplicate","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"threshold","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"threshold","kind":"plugin","maxTokens":null,"modelMaxTokens":512,"stop":"stop"},{"phase":"overflow","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"error"},{"phase":"overflow","kind":"plugin","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"},{"phase":"overflow","kind":"assistant","maxTokens":null,"modelMaxTokens":16384,"stop":"stop"}]}
+[earendil-works/pi] PASS at b2602be77cb7b0de45dd616407fd210daa48aa75 (0.85.1): packed discovery; compact-only manual lifecycle; explicit user-request context; three rounds and JSONL reload; correction; branch isolation; native gap/fallback success and failure; cancellation/duplicate; threshold/overflow; auth/usage. Faux only; behavioral fidelity unverified.
+[earendil-works/pi] total duration 0.9s

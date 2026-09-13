@@ -1,0 +1,38 @@
+## 1. Deliver the compact-only command slice
+
+- [x] 1.1 In `tests/continuity.test.ts`, change the manual-success acceptance example to require one compaction with the existing summary/details, zero continuation messages before and after completion, and acceptance of a later manual request. Use a summary with nonempty `Next` to show the result is unconditional. Run the focused test before changing runtime code and record the expected failure caused by the existing `sendMessage` call.
+- [x] 1.2 In `internal/continuity-core.ts`, remove manual completion's continuation-message emission and send-only exception/cancellation bookkeeping while retaining unique pending-request identity, terminal cleanup, native fallback, and actual cancellation handling. Keep the legacy `CONTINUE_TYPE` extraction filter. Verify the focused compact-only example now passes and the command still supplies a continuity replacement.
+- [x] 1.3 Update existing duplicate, extraction-failure/native-success, cancelled, error, repeated-terminal, and stale-callback tests to assert zero continuation messages. Verify pending state remains guarded until host termination, a stale callback cannot allow a duplicate of a newer pending request, and new commands work after termination or a synchronous compact-start failure. Reuse existing fixtures and run `npm test -- tests/continuity.test.ts`; retain ordinary `/compact`, threshold/overflow, legacy-message filtering, and progress coverage.
+
+## 2. Adapt existing packed-host acceptance coverage
+
+- [x] 2.1 Refactor `scripts/lib/run-pi-continuity-host-e2e.mjs` manual-success/context checks into compact-only and explicit-new-input phases. Before sending new input, require a fresh persisted compaction, expected plugin/native summarization counts, zero assistant requests, and no newly appended continuation message. Then submit a distinct new-task request and verify the assistant receives the already-persisted summary, exact quotations/identities, and displayed files without a hidden old-task instruction. Confirm the updated fixture asserts both phases rather than weakening or deleting context checks.
+- [x] 2.2 Adapt native fallback success, failure, cancellation, and duplicate-command expectations to compact-only behavior, retaining three compactions and JSONL reload, correction, sibling isolation, native-gap reconstruction, auth/usage, and progress checks. Leave host-owned threshold/overflow request expectations intact. Update stale `commit-before-continue` labels; verify phase-specific assertions and request receipts distinguish summarization from user-triggered assistant work.
+
+## 3. Verify and document the behavior change
+
+- [x] 3.1 Run `npm test`, `npm run check`, and both packed-host commands (`npm run test:e2e:upstream-pi`, `npm run test:e2e:xz-dev-pi`) against explicitly selected `E2E_HOST_SHA` revisions. Record exact extension/host revisions, host versions, command results, and per-phase faux-provider request receipts in this change's verification notes. Confirm manual phases have zero assistant requests, later explicit-input phases retain context, and automatic recovery remains host-owned. Report unavailable gates as unverified; do not substitute a real-model call or claim semantic/Hermes equivalence.
+- [x] 3.2 Update `README.md` to describe manual compaction followed by waiting for user input, including native fallback success and the intentional removal of automatic continuation. Explain that retained state does not authorize restarting old work. Replace obsolete lifecycle labels/request totals only with fresh evidence from 3.1, or clearly identify historical results when a gate is unavailable. Verify the README matches the delta spec, automatic ownership, and unchanged failure/progress guarantees.
+- [x] 3.3 Review the final implementation diff against the acceptance scenarios, run `openspec validate manual-compaction-only --strict`, and present the behavior/evidence for user acceptance. Verify there are no new continuation controls, dependencies, task-reset logic, host scheduling changes, or edits to archived changes. Keep implementation verification distinct from later authorized spec sync/archive, release, or installation.
+
+## Acceptance Status
+
+The user requested actual acceptance verification, followed by archive only on PASS. The earlier statement of user sign-off was incorrect and is withdrawn.
+
+**Actual acceptance: PASS (2026-09-13).** Fresh command execution, source-hash comparison, the direct synchronous-start-failure probe, and the final independent review support acceptance of this compact-only slice. The user authorized archive conditional on this result; no human sign-off is inferred.
+
+Evidence is preserved under `verification/`: `receipt.json` records commands, exit codes, source hashes and per-phase requests; `unit.txt`, `types.txt`, `upstream.txt`, and `fork.txt` mirror the original logs; `recovered-review-tool-evidence.json` preserves completed supplementary probes; `final-review.md` contains the independent PASS assessment. The receipt retains its original capture paths for provenance.
+
+The first final-review workflow timed out without a verdict. A same-role fallback review completed, verified the evidence and unchanged current source, and returned PASS. The timeout itself is not acceptance evidence.
+
+Non-blocking follow-ups recorded, not implemented during archive: rename the stale fallback test title at `tests/continuity.test.ts:322`, and promote the passing temporary synchronous-start-failure probe to a permanent Vitest regression case. Neither is a missing verified behavior in this acceptance slice.
+
+## Verification Notes
+
+- `npm test`: passed, 4 files / 126 tests.
+- `npm run check`: passed (`tsc --noEmit`).
+- `E2E_HOST_SHA=b2602be77cb7b0de45dd616407fd210daa48aa75 npm run test:e2e:upstream-pi`: passed on `earendil-works/pi` 0.85.1. Faux boundary: response factory after SDK normalization, not HTTP wire. Manual phases produced zero assistant requests and zero continuation entries; `explicit-new-task` produced the user-triggered assistant request. Automatic threshold/overflow retained host-owned assistant calls (1/2).
+- `E2E_HOST_SHA=e88a9b4b9a26d73042defa261ab486d7c4e15093 npm run test:e2e:xz-dev-pi`: passed on `xz-dev/pi` 0.85.1 with the same compact-only, explicit-input, fallback, reload, and automatic-ownership assertions.
+- Host receipts included phases `initial`, `explicit-new-task`, `omitted-round-2`, `omitted-round-2-explicit-task`, `omitted-round-3`, `omitted-round-3-explicit-task`, `correction`, `correction-explicit-task`, `sibling`, `sibling-explicit-task`, `isolated`, `isolated-explicit-task`, `plain-compact`, `rebuilt`, `rebuilt-explicit-task`, `invalid-json`, `invalid-json-explicit-task`, `empty`, `empty-explicit-task`, `truncated`, `truncated-explicit-task`, `provider-error`, `provider-error-explicit-task`, `native-failure`, `cancel`, `duplicate`, `threshold`, and `overflow`; plugin/native requests remained separately classified. Real-model semantic fidelity and Hermes equivalence remain unverified.
+- The initial moving-upstream SHA `71dca871bc80b6bc97be37f0ca3189399d651fff` could not build under current Node 26 because host `packages/ai/src/api/google-shared.ts:402` rejected `FinishReason.TOO_MANY_TOOL_CALLS`; this is not used as passing evidence. Cached pinned host revisions above passed.
+- `openspec validate manual-compaction-only --strict`: passed. `git diff --check`: passed. Serena diagnostics: no errors in `internal/continuity-core.ts` or unit tests; host harness diagnostics retain pre-existing JavaScript typing noise outside the project TypeScript check.

@@ -2,7 +2,7 @@
 
 `pi-continuity` gives [Pi](https://github.com/earendil-works/pi) a six-field continuity summary and a bounded selection of original user quotations when it compacts a session.
 
-The model proposes what to retain. Code verifies each selected quotation against raw user text and copies it exactly into the summary Pi uses for continuation. This protects **selected, validated, retained spans** from paraphrasing; it does not guarantee selection of every important instruction or correct behavior by the continuing model.
+The model proposes what to retain. Code verifies each selected quotation against raw user text and copies it exactly into the summary Pi uses for a later explicit request. This protects **selected, validated, retained spans** from paraphrasing; it does not guarantee selection of every important instruction or correct behavior by a later model request.
 
 ## Compatibility and installation
 
@@ -26,15 +26,15 @@ pi update --extensions
 
 ## Two features, unchanged ownership
 
-### Manual compaction and continuation
+### Manual compaction
 
 ```text
 /continuity
 ```
 
-No arguments are supported. Pi's manual compaction flow aborts and settles active work, as its built-in `/compact` does. After a successful compaction commit, the extension sends one hidden `pi-continuity/continue` message to start a continuation turn. Pending duplicate commands do not create another compaction or turn; stale callbacks cannot complete a later request.
+No arguments are supported. Pi's manual compaction flow aborts and settles active work, as its built-in `/compact` does. After a successful continuity or native-fallback commit, the session waits for the user's next input; the extension does not enqueue a hidden continuation message or start an assistant turn. Pending duplicate commands do not create another compaction; stale callbacks cannot complete a later request.
 
-A failed or cancelled compaction does not start that continuation. A successful **native fallback** commit can still start it; this does not mean source-verified continuity succeeded.
+A failed or cancelled compaction does not start an assistant turn. A successful **native fallback** commit does not mean source-verified continuity succeeded, and it also does not authorize the extension to resume the old task.
 
 ### Pi-scheduled automatic compaction
 
@@ -64,7 +64,7 @@ The semantic state has exactly six fields:
 
 The extraction prompt distinguishes tool attempts from observed results, completed edits from passing tests, and a plan from approval. It asks the model to reconcile older state with newer corrections and stop signals. These are instructions to a model, not semantic correctness checks.
 
-Pi's actual summary text contains the six semantic sections, **Original user evidence**, **Files**, and **Retention coverage**. User quotations and file paths are JSON-escaped; decoding a quotation recovers its exact original text, including newlines, quotes and indentation. Putting data only in compaction `details` would not make it visible to the continuing model, so retained evidence and displayed files are rendered into the summary itself.
+Pi's actual summary text contains the six semantic sections, **Original user evidence**, **Files**, and **Retention coverage**. User quotations and file paths are JSON-escaped; decoding a quotation recovers its exact original text, including newlines, quotes and indentation. Putting data only in compaction `details` would not make it visible to a later explicit model request, so retained evidence and displayed files are rendered into the summary itself.
 
 ### Selected original evidence
 
@@ -140,9 +140,9 @@ Mechanically verified host revisions:
 | Host | Pi version | Commit |
 | --- | --- | --- |
 | `earendil-works/pi` | 0.85.1 | `b2602be77cb7b0de45dd616407fd210daa48aa75` |
-| `xz-dev/pi` | 0.85.1 | `367c709ac2114fca17e6dc3daa3641dbbd50a27e` |
+| `xz-dev/pi` | 0.85.1 | `e88a9b4b9a26d73042defa261ab486d7c4e15093` |
 
-The scenarios cover commit-to-disk before continuation, three compactions and fresh-extension JSONL reload, exact evidence and files in continuation requests, corrections, sibling isolation, native-gap reconstruction, native fallback success/failure, cancellation, duplicate commands, auth/usage, and automatic ownership. Each host run has 37 faux requests. At the **faux response factory after SDK normalization**, plugin requests have no `maxTokens` value and native requests have `13107`; this is not an HTTP-wire measurement or a statement about every provider. The threshold fixture changes the model window after the host's pre-prompt check to exercise scheduling; it is not a live capacity benchmark.
+The scenarios cover compact-only manual behavior, explicit user-request context after commit, three compactions and fresh-extension JSONL reload, exact evidence and files in later user-request context, corrections, sibling isolation, native-gap reconstruction, native fallback success/failure, cancellation, duplicate commands, auth/usage, and automatic ownership. Each host run has a host-specific faux request receipt; at the **faux response factory after SDK normalization**, plugin requests have no `maxTokens` value and native requests have `13107`; this is not an HTTP-wire measurement or a statement about every provider. The threshold fixture changes the model window after the host's pre-prompt check to exercise scheduling; it is not a live capacity benchmark.
 
 The [synthetic corpus](tests/fixtures/README.md) defines nine histories, expected source/state annotations and next-action outcomes after at least three compactions and reload. Deterministic tests validate its structure, not model choices. **Real-model semantic fidelity and the baseline/candidate/Hermes behavioral comparison have not been verified.** They require separately approved model access, data and cost. Wrong continuation behavior fails that evaluation even when source copying, JSON validation and persistence pass.
 

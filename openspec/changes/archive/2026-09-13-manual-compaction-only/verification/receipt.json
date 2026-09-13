@@ -1,0 +1,755 @@
+{
+  "checkedAt": "2026-09-13T03:39:02.477Z",
+  "head": "addc79f3cff778710cdc3c420c327e4563fb5260",
+  "sourceHashes": {
+    "internal/continuity-core.ts": "f5626435cab43a5d87feda1d92d814c7ab4e7d3fd9480db651c7a4b7ac2cab48",
+    "internal/continuity-evidence.ts": "a8a81ba27c635914adb52c63c362ec7d99fa1c5b61a7bba65746ea9af99d7e23",
+    "internal/continuity-progress.ts": "710e20481017b3880eabcdcd8c45f2de9d82b3301385c3cb387fba8ccf837176",
+    "extensions/continuity.ts": "ba1cc6a35f8c5d966827020471964496d6e360495c9d72441f0a7b9e5eeccfe1",
+    "scripts/lib/run-pi-continuity-host-e2e.mjs": "f6d66c21a53b0c06659ddeb8ede21254c2e9bae217aa6df0556af167ced6c8f6",
+    "tests/continuity.test.ts": "dc0fed12d9e02a32d80ac5db91c6b257c3d4d9ddd0d2dde0f8d05e03230f0ea8",
+    "README.md": "b8acf828f1e030f16fff39f8e9a8fd0effdca9f45ca8d139cb3a8816a2e4bd08",
+    "tests/fixtures/README.md": "88067ceb66123da1d7e84b023888d9292bf332d1a2ffe49c688d2e430e6e2870",
+    "package.json": "81851154b21974e81d9fa0897570771c7b97576d47f022f604924e7dff3d5846",
+    "package-lock.json": "b5dbe0acfe3d1695dfd11f975454c6334455f3edb5a23953bf68c6db33e4a908"
+  },
+  "sourceUnchanged": true,
+  "results": [
+    {
+      "id": "unit",
+      "command": "npm test",
+      "exitCode": 0,
+      "log": "/tmp/pi-continuity-acceptance-bwudE2/unit.log"
+    },
+    {
+      "id": "types",
+      "command": "npm run check",
+      "exitCode": 0,
+      "log": "/tmp/pi-continuity-acceptance-bwudE2/types.log"
+    },
+    {
+      "id": "upstream",
+      "command": "E2E_HOST_SHA=b2602be77cb7b0de45dd616407fd210daa48aa75 npm run test:e2e:upstream-pi",
+      "exitCode": 0,
+      "log": "/tmp/pi-continuity-acceptance-bwudE2/upstream.log",
+      "receipt": {
+        "hostVersion": "0.85.1",
+        "sha": "b2602be77cb7b0de45dd616407fd210daa48aa75",
+        "boundary": "faux response factory after SDK normalization; not HTTP wire",
+        "requests": [
+          {
+            "phase": "initial",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "explicit-new-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "omitted-round-2",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "omitted-round-2-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "omitted-round-3",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "omitted-round-3-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "correction",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "correction-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "sibling",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "sibling-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "isolated",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "isolated-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "plain-compact",
+            "kind": "native",
+            "maxTokens": 13107,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "rebuilt",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "rebuilt-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "invalid-json",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "invalid-json",
+            "kind": "native",
+            "maxTokens": 13107,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "invalid-json-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "empty",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "empty",
+            "kind": "native",
+            "maxTokens": 13107,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "empty-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "truncated",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "length"
+          },
+          {
+            "phase": "truncated",
+            "kind": "native",
+            "maxTokens": 13107,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "truncated-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "provider-error",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "error"
+          },
+          {
+            "phase": "provider-error",
+            "kind": "native",
+            "maxTokens": 13107,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "provider-error-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "native-failure",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "native-failure",
+            "kind": "native",
+            "maxTokens": 13107,
+            "modelMaxTokens": 16384,
+            "stop": "error"
+          },
+          {
+            "phase": "cancel",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "aborted"
+          },
+          {
+            "phase": "duplicate",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "threshold",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "threshold",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 512,
+            "stop": "stop"
+          },
+          {
+            "phase": "overflow",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "error"
+          },
+          {
+            "phase": "overflow",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "overflow",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          }
+        ]
+      },
+      "phases": {
+        "initial": {
+          "plugin": 1
+        },
+        "explicit-new-task": {
+          "assistant": 1
+        },
+        "omitted-round-2": {
+          "plugin": 1
+        },
+        "omitted-round-2-explicit-task": {
+          "assistant": 1
+        },
+        "omitted-round-3": {
+          "plugin": 1
+        },
+        "omitted-round-3-explicit-task": {
+          "assistant": 1
+        },
+        "correction": {
+          "plugin": 1
+        },
+        "correction-explicit-task": {
+          "assistant": 1
+        },
+        "sibling": {
+          "plugin": 1
+        },
+        "sibling-explicit-task": {
+          "assistant": 1
+        },
+        "isolated": {
+          "plugin": 1
+        },
+        "isolated-explicit-task": {
+          "assistant": 1
+        },
+        "plain-compact": {
+          "native": 1
+        },
+        "rebuilt": {
+          "plugin": 1
+        },
+        "rebuilt-explicit-task": {
+          "assistant": 1
+        },
+        "invalid-json": {
+          "plugin": 1,
+          "native": 1
+        },
+        "invalid-json-explicit-task": {
+          "assistant": 1
+        },
+        "empty": {
+          "plugin": 1,
+          "native": 1
+        },
+        "empty-explicit-task": {
+          "assistant": 1
+        },
+        "truncated": {
+          "plugin": 1,
+          "native": 1
+        },
+        "truncated-explicit-task": {
+          "assistant": 1
+        },
+        "provider-error": {
+          "plugin": 1,
+          "native": 1
+        },
+        "provider-error-explicit-task": {
+          "assistant": 1
+        },
+        "native-failure": {
+          "plugin": 1,
+          "native": 1
+        },
+        "cancel": {
+          "plugin": 1
+        },
+        "duplicate": {
+          "plugin": 1
+        },
+        "threshold": {
+          "assistant": 1,
+          "plugin": 1
+        },
+        "overflow": {
+          "assistant": 2,
+          "plugin": 1
+        }
+      }
+    },
+    {
+      "id": "fork",
+      "command": "E2E_HOST_SHA=e88a9b4b9a26d73042defa261ab486d7c4e15093 npm run test:e2e:xz-dev-pi",
+      "exitCode": 0,
+      "log": "/tmp/pi-continuity-acceptance-bwudE2/fork.log",
+      "receipt": {
+        "hostVersion": "0.85.1",
+        "sha": "e88a9b4b9a26d73042defa261ab486d7c4e15093",
+        "boundary": "faux response factory after SDK normalization; not HTTP wire",
+        "requests": [
+          {
+            "phase": "initial",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "explicit-new-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "omitted-round-2",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "omitted-round-2-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "omitted-round-3",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "omitted-round-3-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "correction",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "correction-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "sibling",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "sibling-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "isolated",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "isolated-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "plain-compact",
+            "kind": "native",
+            "maxTokens": 13107,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "rebuilt",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "rebuilt-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "invalid-json",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "invalid-json",
+            "kind": "native",
+            "maxTokens": 13107,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "invalid-json-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "empty",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "empty",
+            "kind": "native",
+            "maxTokens": 13107,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "empty-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "truncated",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "length"
+          },
+          {
+            "phase": "truncated",
+            "kind": "native",
+            "maxTokens": 13107,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "truncated-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "provider-error",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "error"
+          },
+          {
+            "phase": "provider-error",
+            "kind": "native",
+            "maxTokens": 13107,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "provider-error-explicit-task",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "native-failure",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "native-failure",
+            "kind": "native",
+            "maxTokens": 13107,
+            "modelMaxTokens": 16384,
+            "stop": "error"
+          },
+          {
+            "phase": "cancel",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "aborted"
+          },
+          {
+            "phase": "duplicate",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "threshold",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "threshold",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 512,
+            "stop": "stop"
+          },
+          {
+            "phase": "overflow",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "error"
+          },
+          {
+            "phase": "overflow",
+            "kind": "plugin",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          },
+          {
+            "phase": "overflow",
+            "kind": "assistant",
+            "maxTokens": null,
+            "modelMaxTokens": 16384,
+            "stop": "stop"
+          }
+        ]
+      },
+      "phases": {
+        "initial": {
+          "plugin": 1
+        },
+        "explicit-new-task": {
+          "assistant": 1
+        },
+        "omitted-round-2": {
+          "plugin": 1
+        },
+        "omitted-round-2-explicit-task": {
+          "assistant": 1
+        },
+        "omitted-round-3": {
+          "plugin": 1
+        },
+        "omitted-round-3-explicit-task": {
+          "assistant": 1
+        },
+        "correction": {
+          "plugin": 1
+        },
+        "correction-explicit-task": {
+          "assistant": 1
+        },
+        "sibling": {
+          "plugin": 1
+        },
+        "sibling-explicit-task": {
+          "assistant": 1
+        },
+        "isolated": {
+          "plugin": 1
+        },
+        "isolated-explicit-task": {
+          "assistant": 1
+        },
+        "plain-compact": {
+          "native": 1
+        },
+        "rebuilt": {
+          "plugin": 1
+        },
+        "rebuilt-explicit-task": {
+          "assistant": 1
+        },
+        "invalid-json": {
+          "plugin": 1,
+          "native": 1
+        },
+        "invalid-json-explicit-task": {
+          "assistant": 1
+        },
+        "empty": {
+          "plugin": 1,
+          "native": 1
+        },
+        "empty-explicit-task": {
+          "assistant": 1
+        },
+        "truncated": {
+          "plugin": 1,
+          "native": 1
+        },
+        "truncated-explicit-task": {
+          "assistant": 1
+        },
+        "provider-error": {
+          "plugin": 1,
+          "native": 1
+        },
+        "provider-error-explicit-task": {
+          "assistant": 1
+        },
+        "native-failure": {
+          "plugin": 1,
+          "native": 1
+        },
+        "cancel": {
+          "plugin": 1
+        },
+        "duplicate": {
+          "plugin": 1
+        },
+        "threshold": {
+          "assistant": 1,
+          "plugin": 1
+        },
+        "overflow": {
+          "assistant": 2,
+          "plugin": 1
+        }
+      }
+    }
+  ],
+  "openspec": {
+    "exitCode": 0,
+    "output": "Change 'manual-compaction-only' is valid\n"
+  },
+  "whitespace": {
+    "exitCode": 0,
+    "output": ""
+  }
+}

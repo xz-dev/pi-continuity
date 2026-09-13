@@ -10,7 +10,7 @@
 - Supply only the history through the existing extraction/provider seam, with user rows available to the raw-source catalogue. Do not include `expected` in model input or supply its selections as a canned response and call that an evaluation.
 - `expected.summary` defines the intended state; equivalent wording is acceptable. `quotes` identifies exact source spans. `obsoleteUserQuotes` identifies superseded/satisfied requests with later user support, not a ban on mentioning them historically.
 - `nextAction` and `forbiddenActions` describe behavior to assess after at least three compactions and session reload. Assess the actual proposed actions, tool calls and answer—not keyword presence, a model's claim of success, JSON validity, or a quotation match alone.
-- `nextAction.kind: "none"` permits a brief acknowledgement but no new work. It does not change `/continuity`'s one-time continuation lifecycle.
+- `nextAction.kind: "none"` permits a brief acknowledgement but no new work. It does not change `/continuity`'s compact-only lifecycle.
 
 ## Authorized comparison protocol
 
