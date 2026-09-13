@@ -354,11 +354,10 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 				const branch = manager.getBranch();
 				const compact = branchCompaction();
 				const continuation = branch.findLast((entry) => entry.type === "custom_message" && entry.customType === "pi-continuity/continue");
-				assert(compact && continuation, `${phase}: assistant request preceded the commit/continuation`);
-				assert(branch.indexOf(compact) < branch.indexOf(continuation), "commit must precede the continuation");
-				assert.equal(continuation.display, false);
+				assert(compact && !continuation, `${phase}: explicit user request must follow a committed compaction without a hidden continuation`);
 				const persisted = (await readFile(manager.getSessionFile(), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-				assert(persisted.some((entry) => entry.id === compact.id), "compaction must be on disk before the continuation request");
+				assert(persisted.some((entry) => entry.id === compact.id), "compaction must be on disk before the explicit user request");
+				assert(!text.includes("Continue the work represented by the just-committed continuity summary."), "explicit user request must not receive the removed continuation instruction");
 				for (const ref of compact.details?.continuity?.evidence ?? []) {
 					const source = branch.find((entry) => entry.id === ref.entryId);
 					assert.equal(source?.type, "message");
@@ -366,10 +365,10 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 					const block = typeof source.message.content === "string" ? source.message.content : source.message.content[ref.blockIndex].text;
 					const originalText = block.slice(ref.start, ref.end);
 					assert.equal(ref.id, createHash("sha256").update(JSON.stringify([ref.entryId, ref.blockIndex, ref.start, ref.end, originalText])).digest("hex"));
-					assert(text.includes(JSON.stringify(originalText)), "continuing model must actually receive the exact quoted text");
-					assert(text.includes(ref.id), "continuing model must receive the verified identity");
+					assert(text.includes(JSON.stringify(originalText)), "explicit user request must receive the exact quoted text");
+					assert(text.includes(ref.id), "explicit user request must receive the verified identity");
 				}
-				for (const path of [...(compact.details?.readFiles ?? []), ...(compact.details?.modifiedFiles ?? [])]) assert(text.includes(JSON.stringify(path)), "available fixture file must be in continuing model input");
+				for (const path of [...(compact.details?.readFiles ?? []), ...(compact.details?.modifiedFiles ?? [])]) assert(text.includes(JSON.stringify(path)), "available fixture file must be in explicit user-request context");
 			}
 			return fauxAssistantMessage("Synthetic continuation settled; no semantic behavior claim.");
 		} catch (error) {
@@ -424,7 +423,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		({ session } = await createAgentSession({ cwd: project, agentDir, model: faux.getModel(), modelRuntime, resourceLoader, sessionManager: manager, settingsManager, noTools: "all" }));
 		await session.bindExtensions({ uiContext: createNotifier(notifications, widgetEvents, () => phase) });
 	}
-	async function manual(name, quotes = []) {
+	async function manual(name, quotes = [], previousId) {
 		seedUser(`Continue synthetic analysis (${name}); do not use real tools.`);
 		const before = continuationCount();
 		start(name, quotes);
@@ -432,14 +431,27 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		await settle();
 		assert.equal(calls("plugin"), 1, `${name}: exactly one plugin extraction`);
 		assert.equal(calls("native"), 0, `${name}: must not silently pass via native fallback`);
-		assert.equal(calls("assistant"), 1, `${name}: exactly one continuation`);
-		assert.equal(continuationCount(), before + 1);
-		assert.equal(branchCompaction().fromHook, true);
-		const reported = branchCompaction().usage;
+		assert.equal(calls("assistant"), 0, `${name}: manual compaction must not start an assistant turn`);
+		assert.equal(continuationCount(), before, `${name}: manual compaction must not append a plugin continuation`);
+		const compact = branchCompaction();
+		assert(compact, `${name}: manual compaction must commit an entry`);
+		if (previousId) assert.notEqual(compact.id, previousId, `${name}: manual compaction must create a fresh entry`);
+		assert.equal(compact.fromHook, true);
+		const reported = compact.usage;
 		assert(reported.input > 0 && reported.output > 0, "persist the faux provider's normalized usage, not the factory placeholder");
 		assert.equal(reported.totalTokens, reported.input + reported.output + reported.cacheRead + reported.cacheWrite);
 		assertWidgetLifecycle(name);
-		return branchCompaction();
+		return compact;
+	}
+	async function explicitTask(name, compact, quotes = []) {
+		const before = continuationCount();
+		assert.equal(branchCompaction()?.id, compact.id, `${name}: explicit input must follow the requested fresh compaction`);
+		start(name, quotes);
+		await session.prompt(`Start explicit new task after compaction (${name}); do not resume the previous task.`);
+		await settle();
+		assert.equal(calls("assistant"), 1, `${name}: exactly one user-triggered assistant request`);
+		assert.equal(branchCompaction()?.id, compact.id, `${name}: explicit input must not replace the committed compaction`);
+		assert.equal(continuationCount(), before, `${name}: explicit task must not add a plugin continuation`);
 	}
 	try {
 		modelRuntime = await ModelRuntime.create({ modelsPath: null, allowModelNetwork: false });
@@ -455,31 +467,40 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		const first = await manual("initial", [rootConstraint, oldPort]);
 		assert.equal(first.details.continuity.evidence.length, 2);
 		assert(first.details.modifiedFiles.includes(fixturePath));
+		await explicitTask("explicit-new-task", first, [rootConstraint, oldPort]);
 		const expected = first.details.continuity.evidence;
 		retiredId = expected.find((ref) => original.slice(ref.start, ref.end) === oldPort).id;
 		const file = manager.getSessionFile();
 		for (const name of ["omitted-round-2", "omitted-round-3"]) {
 			await open(SessionManager.open(file));
-			const compact = await manual(name);
+			const previous = branchCompaction().id;
+			const compact = await manual(name, [], previous);
+			await explicitTask(`${name}-explicit-task`, compact);
 			assert.deepEqual(compact.details.continuity.evidence, expected);
 			assert.equal(compact.details.continuity.coverage.basis, "carried");
 			assert(compact.details.modifiedFiles.includes(fixturePath));
 		}
 		await open(SessionManager.open(file));
 		seedUser(newPort);
-		const corrected = await manual("correction", [newPort]);
+		const previousCorrection = branchCompaction().id;
+		const corrected = await manual("correction", [newPort], previousCorrection);
+		await explicitTask("correction-explicit-task", corrected, [newPort]);
 		assert.equal(corrected.details.continuity.coverage.retired, 1);
 		assert(!corrected.details.continuity.evidence.some((ref) => ref.id === retiredId));
 		assert.equal(corrected.details.continuity.evidence.length, 2);
 
 		const forkPoint = manager.getLeafId();
 		seedUser("Sibling-only constraint.");
-		const sibling = await manual("sibling", ["Sibling-only constraint."]);
+		const previousSibling = branchCompaction().id;
+		const sibling = await manual("sibling", ["Sibling-only constraint."], previousSibling);
+		await explicitTask("sibling-explicit-task", sibling, ["Sibling-only constraint."]);
 		const siblingId = sibling.details.continuity.evidence.find((ref) => !corrected.details.continuity.evidence.some((old) => old.id === ref.id)).id;
 		manager.branch(forkPoint);
 		seedUser("Independent branch after the fork.");
 		await open(SessionManager.open(file));
-		const isolated = await manual("isolated");
+		const previousIsolated = branchCompaction().id;
+		const isolated = await manual("isolated", [], previousIsolated);
+		await explicitTask("isolated-explicit-task", isolated);
 		assert(!isolated.details.continuity.evidence.some((ref) => ref.id === siblingId));
 		assert(!isolated.summary.includes("Sibling-only constraint."));
 
@@ -493,20 +514,26 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		assert(calls("native") >= 1);
 		assert.equal(calls("assistant"), 0);
 		assert.equal(continuationCount(), beforePlain);
-		const rebuilt = await manual("rebuilt", [rootConstraint]);
+		const previousRebuilt = branchCompaction().id;
+		const rebuilt = await manual("rebuilt", [rootConstraint], previousRebuilt);
+		await explicitTask("rebuilt-explicit-task", rebuilt, [rootConstraint]);
 		assert.equal(rebuilt.details.continuity.coverage.basis, "rebuilt");
 
 		for (const name of ["invalid-json", "empty", "truncated", "provider-error"]) {
 			seedUser(`Native fallback fixture ${name}.`);
 			const before = continuationCount();
+			const previous = branchCompaction().id;
 			start(name);
 			await session.prompt("/continuity");
 			await settle();
 			assert.equal(calls("plugin"), 1);
 			assert(calls("native") >= 1 && calls("native") <= 2, "native fallback may summarize both history and split-turn prefix");
-			assert.equal(calls("assistant"), 1);
-			assert.notEqual(branchCompaction().fromHook, true);
-			assert.equal(continuationCount(), before + 1);
+			assert.equal(calls("assistant"), 0);
+			assert.equal(continuationCount(), before);
+			const compact = branchCompaction();
+			assert(compact && compact.id !== previous, `${name}: native fallback must commit a fresh compaction`);
+			assert.notEqual(compact.fromHook, true);
+			await explicitTask(`${name}-explicit-task`, compact);
 			assertWidgetCleared(name);
 		}
 		for (const name of ["native-failure", "cancel"]) {
@@ -537,8 +564,8 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		duplicateRelease();
 		await settle();
 		assert.equal(calls("plugin"), 1);
-		assert.equal(calls("assistant"), 1);
-		assert.equal(continuationCount(), beforeDuplicate + 1);
+		assert.equal(calls("assistant"), 0);
+		assert.equal(continuationCount(), beforeDuplicate);
 		assert(notifications.some((notice) => notice.message.includes("already pending")));
 
 		for (const name of ["threshold", "overflow"]) {
@@ -557,7 +584,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			assertWidgetLifecycle(name);
 		}
 		console.log(`[${label}] provider-boundary receipt ${JSON.stringify({ hostVersion, sha, boundary: "faux response factory after SDK normalization; not HTTP wire", requests })}`);
-		console.log(`[${label}] PASS at ${sha} (${hostVersion}): packed discovery; commit-before-continue; three rounds and JSONL reload; correction; branch isolation; native gap/fallback success and failure; cancellation/duplicate; threshold/overflow; auth/usage. Faux only; behavioral fidelity unverified.`);
+		console.log(`[${label}] PASS at ${sha} (${hostVersion}): packed discovery; compact-only manual lifecycle; explicit user-request context; three rounds and JSONL reload; correction; branch isolation; native gap/fallback success and failure; cancellation/duplicate; threshold/overflow; auth/usage. Faux only; behavioral fidelity unverified.`);
 	} finally {
 		duplicateRelease?.();
 		session?.dispose();

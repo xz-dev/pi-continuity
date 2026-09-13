@@ -342,7 +342,7 @@ describe("extraction prompt and failure contract", () => {
 		expect(stream.mock.calls.length).toBeLessThanOrEqual(1);
 		compactCallbacks(ctx)?.onComplete?.();
 		compactCallbacks(ctx)?.onComplete?.();
-		expect(fake.sendMessage).toHaveBeenCalledOnce();
+		expect(fake.sendMessage).not.toHaveBeenCalled();
 	});
 
 	it("uses a single bounded headless diagnostic, never provider text or chat", async () => {
@@ -360,7 +360,7 @@ describe("extraction prompt and failure contract", () => {
 });
 
 describe("manual /continuity", () => {
-	it("calls compact immediately then sends one hidden custom continuation after commit", async () => {
+	it("compacts immediately without starting a continuation turn", async () => {
 		const fake = createFakeExtension();
 		const ctx = context();
 		await requestContinuity(fake, ctx);
@@ -370,10 +370,10 @@ describe("manual /continuity", () => {
 		expect(result).toEqual({ compaction: expect.objectContaining({ summary: expect.stringContaining(renderSummary(summary)), details: expect.objectContaining({ readFiles: ["read-only.ts"], modifiedFiles: ["edited.ts", "shared.ts", "written.ts"] }) }) });
 		expect(fake.sendMessage).not.toHaveBeenCalled();
 		compactCallbacks(ctx)?.onComplete?.();
-		expect(fake.sendMessage).toHaveBeenCalledExactlyOnceWith(
-			{ customType: "pi-continuity/continue", content: "Continue the work represented by the just-committed continuity summary.", display: false },
-			{ triggerTurn: true },
-		);
+		expect(fake.sendMessage).not.toHaveBeenCalled();
+
+		await requestContinuity(fake, ctx);
+		expect(ctx.compact).toHaveBeenCalledTimes(2);
 	});
 
 	it("does not start or continue a duplicate pending request", async () => {
@@ -383,7 +383,7 @@ describe("manual /continuity", () => {
 		await requestContinuity(fake, ctx);
 		expect(ctx.compact).toHaveBeenCalledOnce();
 		compactCallbacks(ctx)?.onComplete?.();
-		expect(fake.sendMessage).toHaveBeenCalledOnce();
+		expect(fake.sendMessage).not.toHaveBeenCalled();
 	});
 
 	it("keeps a cancelled request guarded until compaction terminates", async () => {
@@ -420,13 +420,13 @@ describe("manual /continuity", () => {
 		expect(fake.sendMessage).not.toHaveBeenCalled();
 	});
 
-	it("fails open to native manual compaction while the successful callback continues once", async () => {
+	it("fails open to native manual compaction without starting a continuation", async () => {
 		const fake = createFakeExtension(successfulStream({ ...summary, extra: true }));
 		const ctx = context();
 		await requestContinuity(fake, ctx);
 		expect(await before(fake)?.(compactEvent(), ctx)).toBeUndefined();
 		compactCallbacks(ctx)?.onComplete?.();
-		expect(fake.sendMessage).toHaveBeenCalledOnce();
+		expect(fake.sendMessage).not.toHaveBeenCalled();
 	});
 
 	it.each(["host-signal", "provider-aborted"])("never continues a cancelled %s request even on a late success callback", async (kind) => {
@@ -450,9 +450,14 @@ describe("manual /continuity", () => {
 		await requestContinuity(fake, ctx);
 		old.onComplete?.();
 		old.onError?.(new Error("duplicate old error"));
+		await requestContinuity(fake, ctx);
+		expect(ctx.compact).toHaveBeenCalledTimes(2);
 		expect(fake.sendMessage).not.toHaveBeenCalled();
 		(ctx.compact.mock.calls[1]![0] as any).onComplete();
-		expect(fake.sendMessage).toHaveBeenCalledOnce();
+		await requestContinuity(fake, ctx);
+		expect(ctx.compact).toHaveBeenCalledTimes(3);
+		expect(fake.sendMessage).not.toHaveBeenCalled();
+		(ctx.compact.mock.calls[2]![0] as any).onComplete();
 	});
 
 	it("leaves a plain native /compact event untouched", async () => {

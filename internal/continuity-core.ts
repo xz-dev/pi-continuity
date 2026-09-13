@@ -260,7 +260,7 @@ function renderFiles(files: ReturnType<typeof fileDetails>, budget: number) {
 
 export function createContinuityExtension(dependencies: ContinuityDependencies) {
 	return function continuityExtension(pi: ExtensionAPI): void {
-		let manualPending: { cancelled: boolean } | undefined;
+		let manualPending: object | undefined;
 		let activeProgress: ContinuityProgress | undefined;
 
 		try {
@@ -282,7 +282,6 @@ export function createContinuityExtension(dependencies: ContinuityDependencies) 
 			try {
 				const result = await synthesize(event, ctx, dependencies.stream, progress);
 				if (result === "cancelled") {
-					if (request) request.cancelled = true;
 					return event.signal.aborted ? undefined : { cancel: true };
 				}
 				if (!result) return undefined;
@@ -312,23 +311,12 @@ export function createContinuityExtension(dependencies: ContinuityDependencies) 
 					ctx.ui.notify("Continuity compaction is already pending.", "warning");
 					return;
 				}
-				const request = { cancelled: false };
+				const request = {};
 				manualPending = request;
 				try {
 					ctx.compact({
 						onComplete: () => {
-							if (manualPending !== request) return;
-							manualPending = undefined;
-							if (request.cancelled) return;
-							try {
-								pi.sendMessage({
-									customType: CONTINUE_TYPE,
-									content: "Continue the work represented by the just-committed continuity summary.",
-									display: false,
-								}, { triggerTurn: true });
-							} catch {
-								// The originating session was replaced after compaction committed.
-							}
+							if (manualPending === request) manualPending = undefined;
 						},
 						onError: () => {
 							if (manualPending === request) manualPending = undefined;
