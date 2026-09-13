@@ -376,32 +376,64 @@ describe("manual /continuity", () => {
 		expect(ctx.compact).toHaveBeenCalledTimes(2);
 	});
 
+	it("continues exactly once after /continuity continue commits", async () => {
+		const fake = createFakeExtension();
+		const ctx = context();
+		await requestContinuity(fake, ctx, "continue");
+		expect(ctx.compact).toHaveBeenCalledOnce();
+		expect(fake.sendMessage).not.toHaveBeenCalled();
+
+		const callbacks = compactCallbacks(ctx)!;
+		callbacks.onComplete?.();
+		expect(fake.sendMessage).toHaveBeenCalledOnce();
+		expect(fake.sendMessage).toHaveBeenCalledWith({
+			customType: "pi-continuity/continue",
+			content: "Continue the work represented by the just-committed continuity summary.",
+			display: false,
+		}, { triggerTurn: true });
+		callbacks.onComplete?.();
+		expect(fake.sendMessage).toHaveBeenCalledOnce();
+	});
+
+	it("rejects unsupported arguments before starting compaction", async () => {
+		const fake = createFakeExtension();
+		const ctx = context();
+		const notify = vi.fn();
+		await fake.getCommand()?.handler("later", { ...ctx, ui: { notify } });
+		expect(notify).toHaveBeenCalledWith("Usage: /continuity [continue]", "warning");
+		expect(ctx.compact).not.toHaveBeenCalled();
+		expect(fake.sendMessage).not.toHaveBeenCalled();
+	});
+
 	it("does not start or continue a duplicate pending request", async () => {
 		const fake = createFakeExtension();
 		const ctx = context();
-		await requestContinuity(fake, ctx);
-		await requestContinuity(fake, ctx);
+		await requestContinuity(fake, ctx, "continue");
+		await requestContinuity(fake, ctx, "continue");
 		expect(ctx.compact).toHaveBeenCalledOnce();
-		compactCallbacks(ctx)?.onComplete?.();
-		expect(fake.sendMessage).not.toHaveBeenCalled();
+		const callbacks = compactCallbacks(ctx)!;
+		callbacks.onComplete?.();
+		callbacks.onComplete?.();
+		expect(fake.sendMessage).toHaveBeenCalledOnce();
 	});
 
 	it("keeps a cancelled request guarded until compaction terminates", async () => {
 		const fake = createFakeExtension();
 		const ctx = context();
-		await requestContinuity(fake, ctx);
+		await requestContinuity(fake, ctx, "continue");
 		await before(fake)?.(compactEvent("manual", AbortSignal.abort()), ctx);
-		await requestContinuity(fake, ctx);
+		await requestContinuity(fake, ctx, "continue");
 		expect(ctx.compact).toHaveBeenCalledOnce();
 		compactCallbacks(ctx)?.onError?.(new Error("cancelled"));
-		await requestContinuity(fake, ctx);
+		expect(fake.sendMessage).not.toHaveBeenCalled();
+		await requestContinuity(fake, ctx, "continue");
 		expect(ctx.compact).toHaveBeenCalledTimes(2);
 	});
 
 	it("clears a cancelled request and allows a later request", async () => {
 		const fake = createFakeExtension();
 		const ctx = context();
-		await requestContinuity(fake, ctx);
+		await requestContinuity(fake, ctx, "continue");
 		await before(fake)?.(compactEvent("manual", AbortSignal.abort()), ctx);
 		compactCallbacks(ctx)?.onError?.(new Error("cancelled"));
 		expect(fake.sendMessage).not.toHaveBeenCalled();
@@ -413,27 +445,48 @@ describe("manual /continuity", () => {
 		const fake = createFakeExtension();
 		const compact = vi.fn();
 		const ctx = context(compact);
-		await requestContinuity(fake, ctx);
+		await requestContinuity(fake, ctx, "continue");
 		compactCallbacks(ctx)?.onError?.(new Error("cancelled"));
+		expect(fake.sendMessage).not.toHaveBeenCalled();
 		await requestContinuity(fake, ctx);
 		expect(compact).toHaveBeenCalledTimes(2);
-		expect(fake.sendMessage).not.toHaveBeenCalled();
 	});
 
-	it("fails open to native manual compaction without starting a continuation", async () => {
-		const fake = createFakeExtension(successfulStream({ ...summary, extra: true }));
-		const ctx = context();
-		await requestContinuity(fake, ctx);
-		expect(await before(fake)?.(compactEvent(), ctx)).toBeUndefined();
+	it("clears a synchronous compact-start failure without continuing", async () => {
+		const fake = createFakeExtension();
+		const compact = vi.fn().mockImplementationOnce(() => { throw new Error("synthetic start failure"); });
+		const ctx = context(compact);
+		const notify = vi.fn();
+		await fake.getCommand()?.handler("continue", { ...ctx, ui: { notify } });
+		expect(notify).toHaveBeenCalledWith("Continuity compaction could not start.", "warning");
 		compactCallbacks(ctx)?.onComplete?.();
 		expect(fake.sendMessage).not.toHaveBeenCalled();
+
+		await requestContinuity(fake, ctx, "continue");
+		expect(compact).toHaveBeenCalledTimes(2);
+		(ctx.compact.mock.calls[1]![0] as any).onComplete();
+		expect(fake.sendMessage).toHaveBeenCalledOnce();
+	});
+
+	it.each([
+		{ mode: "default", args: "", continuations: 0 },
+		{ mode: "explicit", args: "continue", continuations: 1 },
+	])("fails open to native manual compaction for $mode mode", async ({ args, continuations }) => {
+		const fake = createFakeExtension(successfulStream({ ...summary, extra: true }));
+		const ctx = context();
+		await requestContinuity(fake, ctx, args);
+		expect(await before(fake)?.(compactEvent(), ctx)).toBeUndefined();
+		const callbacks = compactCallbacks(ctx)!;
+		callbacks.onComplete?.();
+		callbacks.onComplete?.();
+		expect(fake.sendMessage).toHaveBeenCalledTimes(continuations);
 	});
 
 	it.each(["host-signal", "provider-aborted"])("never continues a cancelled %s request even on a late success callback", async (kind) => {
 		const stream = kind === "host-signal" ? successfulStream() : fakeStream("", "aborted");
 		const fake = createFakeExtension(stream);
 		const ctx = context();
-		await requestContinuity(fake, ctx);
+		await requestContinuity(fake, ctx, "continue");
 		await before(fake)?.(compactEvent("manual", kind === "host-signal" ? AbortSignal.abort() : new AbortController().signal), ctx);
 		compactCallbacks(ctx)?.onComplete?.();
 		expect(fake.sendMessage).not.toHaveBeenCalled();
@@ -441,23 +494,27 @@ describe("manual /continuity", () => {
 		expect(ctx.compact).toHaveBeenCalledTimes(2);
 	});
 
-	it("ignores stale terminal callbacks without clearing a later request", async () => {
+	it("ignores stale terminal callbacks without clearing or continuing a later request", async () => {
 		const fake = createFakeExtension();
 		const ctx = context();
-		await requestContinuity(fake, ctx);
+		await requestContinuity(fake, ctx, "continue");
 		const old = compactCallbacks(ctx)!;
 		old.onError?.(new Error("first request failed"));
-		await requestContinuity(fake, ctx);
+		await requestContinuity(fake, ctx, "continue");
+		const current = ctx.compact.mock.calls[1]![0] as any;
 		old.onComplete?.();
 		old.onError?.(new Error("duplicate old error"));
-		await requestContinuity(fake, ctx);
+		await requestContinuity(fake, ctx, "continue");
 		expect(ctx.compact).toHaveBeenCalledTimes(2);
 		expect(fake.sendMessage).not.toHaveBeenCalled();
-		(ctx.compact.mock.calls[1]![0] as any).onComplete();
-		await requestContinuity(fake, ctx);
+
+		current.onComplete();
+		current.onComplete();
+		expect(fake.sendMessage).toHaveBeenCalledOnce();
+		await requestContinuity(fake, ctx, "continue");
 		expect(ctx.compact).toHaveBeenCalledTimes(3);
-		expect(fake.sendMessage).not.toHaveBeenCalled();
 		(ctx.compact.mock.calls[2]![0] as any).onComplete();
+		expect(fake.sendMessage).toHaveBeenCalledTimes(2);
 	});
 
 	it("leaves a plain native /compact event untouched", async () => {

@@ -260,7 +260,7 @@ function renderFiles(files: ReturnType<typeof fileDetails>, budget: number) {
 
 export function createContinuityExtension(dependencies: ContinuityDependencies) {
 	return function continuityExtension(pi: ExtensionAPI): void {
-		let manualPending: object | undefined;
+		let manualPending: { continueAfterCommit: boolean; cancelled: boolean } | undefined;
 		let activeProgress: ContinuityProgress | undefined;
 
 		try {
@@ -282,6 +282,7 @@ export function createContinuityExtension(dependencies: ContinuityDependencies) 
 			try {
 				const result = await synthesize(event, ctx, dependencies.stream, progress);
 				if (result === "cancelled") {
+					if (request) request.cancelled = true;
 					return event.signal.aborted ? undefined : { cancel: true };
 				}
 				if (!result) return undefined;
@@ -301,22 +302,34 @@ export function createContinuityExtension(dependencies: ContinuityDependencies) 
 		});
 
 		pi.registerCommand("continuity", {
-			description: "Compact with a dedicated continuity summary",
+			description: "Compact with a dedicated continuity summary; add 'continue' to resume",
 			handler: async (args, ctx) => {
-				if (args.trim()) {
-					ctx.ui.notify("Usage: /continuity", "warning");
+				const mode = args.trim();
+				if (mode && mode !== "continue") {
+					ctx.ui.notify("Usage: /continuity [continue]", "warning");
 					return;
 				}
 				if (manualPending) {
 					ctx.ui.notify("Continuity compaction is already pending.", "warning");
 					return;
 				}
-				const request = {};
+				const request = { continueAfterCommit: mode === "continue", cancelled: false };
 				manualPending = request;
 				try {
 					ctx.compact({
 						onComplete: () => {
-							if (manualPending === request) manualPending = undefined;
+							if (manualPending !== request) return;
+							manualPending = undefined;
+							if (!request.continueAfterCommit || request.cancelled) return;
+							try {
+								pi.sendMessage({
+									customType: CONTINUE_TYPE,
+									content: "Continue the work represented by the just-committed continuity summary.",
+									display: false,
+								}, { triggerTurn: true });
+							} catch {
+								// The originating session was replaced after compaction committed.
+							}
 						},
 						onError: () => {
 							if (manualPending === request) manualPending = undefined;

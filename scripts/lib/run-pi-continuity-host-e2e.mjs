@@ -273,6 +273,8 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 	const newPort = "Use port 8081 instead of port 8080.";
 	const original = `${rootConstraint}\n${oldPort}`;
 	const fixturePath = "src/host-fixture.ts";
+	const continueConstraint = "Preserve this explicit continuation constraint exactly.";
+	const continueFixturePath = "src/continue-fixture.ts";
 	let phase = "";
 	let selected = [];
 	let retiredId;
@@ -293,6 +295,13 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		session.agent.state.messages = manager.buildSessionContext().messages;
 		return id;
 	}
+	function seedSyntheticWrite(toolCallId, path, text) {
+		const assistant = fauxAssistantMessage([{ type: "text", text }, { type: "toolCall", id: toolCallId, name: "write", arguments: { path, content: "synthetic history, not an executed tool" } }]);
+		assistant.usage = usage;
+		manager.appendMessage(assistant);
+		manager.appendMessage({ role: "toolResult", toolCallId, toolName: "write", content: [{ type: "text", text: "Synthetic write observation." }], isError: false, timestamp: Date.now() });
+		session.agent.state.messages = manager.buildSessionContext().messages;
+	}
 	async function respond(context, options, _state, model) {
 		try {
 			const system = JSON.stringify(context.systemPrompt ?? "");
@@ -303,13 +312,13 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			assert(requests.length - phaseStart <= 8, `${phase}: unexpected request loop`);
 			if (kind === "plugin") {
 				assert.equal(options?.apiKey, "host-e2e-faux-key", "compaction must reuse the runtime model auth");
-				if (phase === "cancel") {
+				if (phase === "cancel" || phase === "continue-cancel") {
 					session.abortCompaction();
 					requests.at(-1).stop = "aborted";
 					return fauxAssistantMessage([], { stopReason: "aborted" });
 				}
-				if (phase === "duplicate") await new Promise((release) => { duplicateRelease = release; });
-				if (phase === "invalid-json" || phase === "native-failure") return fauxAssistantMessage("invalid fixture JSON");
+				if (phase === "duplicate" || phase === "continue-duplicate") await new Promise((release) => { duplicateRelease = release; });
+				if (["invalid-json", "native-failure", "continue-native-fallback", "continue-native-failure"].includes(phase)) return fauxAssistantMessage("invalid fixture JSON");
 				if (phase === "empty") return fauxAssistantMessage("");
 				if (phase === "truncated") {
 					requests.at(-1).stop = "length";
@@ -333,7 +342,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 				return message;
 			}
 			if (kind === "native") {
-				if (phase === "native-failure") {
+				if (phase === "native-failure" || phase === "continue-native-failure") {
 					requests.at(-1).stop = "error";
 					return fauxAssistantMessage([], { stopReason: "error", errorMessage: "HTTP 400 synthetic permanent native failure" });
 				}
@@ -354,10 +363,32 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 				const branch = manager.getBranch();
 				const compact = branchCompaction();
 				const continuation = branch.findLast((entry) => entry.type === "custom_message" && entry.customType === "pi-continuity/continue");
-				assert(compact && !continuation, `${phase}: explicit user request must follow a committed compaction without a hidden continuation`);
+				if (phase.startsWith("continue-")) {
+					assert(compact && continuation, `${phase}: assistant request must follow the committed compaction and hidden continuation`);
+					assert(branch.indexOf(compact) < branch.indexOf(continuation), `${phase}: compaction commit must precede continuation`);
+					assert.equal(continuation.display, false);
+					assert(text.includes(compact.summary), `${phase}: assistant request must receive the committed summary`);
+					assert(text.includes("Continue the work represented by the just-committed continuity summary."), `${phase}: assistant request must receive the hidden continuation instruction`);
+					if (phase === "continue-success") {
+						const evidence = compact.details?.continuity?.evidence ?? [];
+						const reference = evidence.find((ref) => {
+							const source = branch.find((entry) => entry.id === ref.entryId);
+							if (source?.type !== "message" || source.message.role !== "user") return false;
+							const block = typeof source.message.content === "string" ? source.message.content : source.message.content[ref.blockIndex]?.text;
+							return block?.slice(ref.start, ref.end) === continueConstraint;
+						});
+						assert(reference, "continue-success: committed evidence must contain the fresh explicit constraint");
+						assert(text.includes(JSON.stringify(continueConstraint)), "continue-success: assistant request must receive the exact fresh quotation");
+						assert(text.includes(reference.id), "continue-success: assistant request must receive the fresh quotation identity");
+						assert(compact.details?.modifiedFiles?.includes(continueFixturePath), "continue-success: committed files must contain the fresh synthetic write");
+						assert(text.includes(JSON.stringify(continueFixturePath)), "continue-success: assistant request must receive the fresh synthetic file path");
+					}
+				} else {
+					assert(compact && !continuation, `${phase}: explicit user request must follow a committed compaction without a hidden continuation`);
+					assert(!text.includes("Continue the work represented by the just-committed continuity summary."), "explicit user request must not receive the removed continuation instruction");
+				}
 				const persisted = (await readFile(manager.getSessionFile(), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-				assert(persisted.some((entry) => entry.id === compact.id), "compaction must be on disk before the explicit user request");
-				assert(!text.includes("Continue the work represented by the just-committed continuity summary."), "explicit user request must not receive the removed continuation instruction");
+				assert(persisted.some((entry) => entry.id === compact.id), `${phase}: compaction must be on disk before the assistant request`);
 				for (const ref of compact.details?.continuity?.evidence ?? []) {
 					const source = branch.find((entry) => entry.id === ref.entryId);
 					assert.equal(source?.type, "message");
@@ -423,16 +454,17 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		({ session } = await createAgentSession({ cwd: project, agentDir, model: faux.getModel(), modelRuntime, resourceLoader, sessionManager: manager, settingsManager, noTools: "all" }));
 		await session.bindExtensions({ uiContext: createNotifier(notifications, widgetEvents, () => phase) });
 	}
-	async function manual(name, quotes = [], previousId) {
+	async function manual(name, quotes = [], previousId, command = "/continuity") {
+		const continuing = command === "/continuity continue";
 		seedUser(`Continue synthetic analysis (${name}); do not use real tools.`);
 		const before = continuationCount();
 		start(name, quotes);
-		await session.prompt("/continuity");
+		await session.prompt(command);
 		await settle();
 		assert.equal(calls("plugin"), 1, `${name}: exactly one plugin extraction`);
 		assert.equal(calls("native"), 0, `${name}: must not silently pass via native fallback`);
-		assert.equal(calls("assistant"), 0, `${name}: manual compaction must not start an assistant turn`);
-		assert.equal(continuationCount(), before, `${name}: manual compaction must not append a plugin continuation`);
+		assert.equal(calls("assistant"), continuing ? 1 : 0, `${name}: unexpected assistant-turn count`);
+		assert.equal(continuationCount(), before + (continuing ? 1 : 0), `${name}: unexpected hidden-continuation count`);
 		const compact = branchCompaction();
 		assert(compact, `${name}: manual compaction must commit an entry`);
 		if (previousId) assert.notEqual(compact.id, previousId, `${name}: manual compaction must create a fresh entry`);
@@ -459,11 +491,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		await modelRuntime.setRuntimeApiKey(faux.getModel().provider, "host-e2e-faux-key", { allowNetwork: false });
 		await open(SessionManager.create(project, sessionDir));
 		seedUser(original);
-		const assistant = fauxAssistantMessage([{ type: "text", text: "Synthetic preparation. ".repeat(100) }, { type: "toolCall", id: "fixture-write", name: "write", arguments: { path: fixturePath, content: "synthetic history, not an executed tool" } }]);
-		assistant.usage = usage;
-		manager.appendMessage(assistant);
-		manager.appendMessage({ role: "toolResult", toolCallId: "fixture-write", toolName: "write", content: [{ type: "text", text: "Synthetic write observation." }], isError: false, timestamp: Date.now() });
-		session.agent.state.messages = manager.buildSessionContext().messages;
+		seedSyntheticWrite("fixture-write", fixturePath, "Synthetic preparation. ".repeat(100));
 		const first = await manual("initial", [rootConstraint, oldPort]);
 		assert.equal(first.details.continuity.evidence.length, 2);
 		assert(first.details.modifiedFiles.includes(fixturePath));
@@ -553,6 +581,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		}
 		seedUser("Duplicate pending command fixture.");
 		const beforeDuplicate = continuationCount();
+		duplicateRelease = undefined;
 		start("duplicate");
 		await session.prompt("/continuity");
 		const deadline = Date.now() + 10000;
@@ -567,6 +596,64 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		assert.equal(calls("assistant"), 0);
 		assert.equal(continuationCount(), beforeDuplicate);
 		assert(notifications.some((notice) => notice.message.includes("already pending")));
+
+		const continueSourceId = seedUser(continueConstraint);
+		seedSyntheticWrite("continue-fixture-write", continueFixturePath, "Synthetic explicit continuation preparation.");
+		const previousContinued = branchCompaction().id;
+		const continued = await manual("continue-success", [continueConstraint], previousContinued, "/continuity continue");
+		const continuedReference = continued.details.continuity.evidence.find((ref) => ref.entryId === continueSourceId);
+		assert(continuedReference, "explicit continuation must persist the fresh user quotation reference");
+		assert.equal(continuedReference.start, 0);
+		assert.equal(continuedReference.end, continueConstraint.length);
+		assert(continued.details.modifiedFiles.includes(continueFixturePath));
+
+		seedUser("Explicit continuation native fallback fixture.");
+		const beforeContinueFallback = continuationCount();
+		const previousContinueFallback = branchCompaction().id;
+		start("continue-native-fallback");
+		await session.prompt("/continuity continue");
+		await settle();
+		assert.equal(calls("plugin"), 1);
+		assert(calls("native") >= 1 && calls("native") <= 2, "native fallback may summarize both history and split-turn prefix");
+		assert.equal(calls("assistant"), 1);
+		assert.equal(continuationCount(), beforeContinueFallback + 1);
+		assert.notEqual(branchCompaction().id, previousContinueFallback, "explicit fallback must commit before continuing");
+		assert.notEqual(branchCompaction().fromHook, true);
+		assertWidgetCleared("continue-native-fallback");
+
+		for (const name of ["continue-native-failure", "continue-cancel"]) {
+			seedUser(`Explicit continuation failure fixture ${name}.`);
+			const previous = branchCompaction().id;
+			const before = continuationCount();
+			start(name);
+			await session.prompt("/continuity continue");
+			await settle();
+			assert.equal(calls("plugin"), 1);
+			assert.equal(calls("assistant"), 0);
+			assert.equal(continuationCount(), before);
+			assert.equal(branchCompaction().id, previous);
+			assertWidgetCleared(name);
+			if (name === "continue-cancel") assert.equal(calls("native"), 0);
+			else assert(calls("native") >= 1);
+		}
+
+		seedUser("Explicit continuation duplicate fixture.");
+		const beforeContinueDuplicate = continuationCount();
+		duplicateRelease = undefined;
+		start("continue-duplicate");
+		await session.prompt("/continuity continue");
+		const continueDeadline = Date.now() + 10000;
+		while (!duplicateRelease) {
+			assert(Date.now() < continueDeadline, "explicit duplicate fixture did not reach extraction");
+			await new Promise((resolveTurn) => setTimeout(resolveTurn, 5));
+		}
+		await session.prompt("/continuity continue");
+		duplicateRelease();
+		await settle();
+		assert.equal(calls("plugin"), 1);
+		assert.equal(calls("assistant"), 1);
+		assert.equal(continuationCount(), beforeContinueDuplicate + 1);
+		assert(notifications.filter((notice) => notice.message.includes("already pending")).length >= 2);
 
 		for (const name of ["threshold", "overflow"]) {
 			await session.setModel(faux.getModel());
@@ -584,7 +671,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			assertWidgetLifecycle(name);
 		}
 		console.log(`[${label}] provider-boundary receipt ${JSON.stringify({ hostVersion, sha, boundary: "faux response factory after SDK normalization; not HTTP wire", requests })}`);
-		console.log(`[${label}] PASS at ${sha} (${hostVersion}): packed discovery; compact-only manual lifecycle; explicit user-request context; three rounds and JSONL reload; correction; branch isolation; native gap/fallback success and failure; cancellation/duplicate; threshold/overflow; auth/usage. Faux only; behavioral fidelity unverified.`);
+		console.log(`[${label}] PASS at ${sha} (${hostVersion}): packed discovery; default compact-only and explicit compact-and-continue lifecycles; explicit user-request context; three rounds and JSONL reload; correction; branch isolation; native gap/fallback success and failure; cancellation/duplicate; threshold/overflow; auth/usage. Faux only; behavioral fidelity unverified.`);
 	} finally {
 		duplicateRelease?.();
 		session?.dispose();
