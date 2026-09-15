@@ -306,7 +306,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		try {
 			const system = JSON.stringify(context.systemPrompt ?? "");
 			const text = textOf(context);
-			const kind = system.includes("exactly summary, quotes, retire") ? "plugin"
+			const kind = system.includes("Call submit_continuity exactly once") ? "plugin"
 				: system.includes("context summarization assistant") ? "native" : "assistant";
 			requests.push({ phase, kind, maxTokens: options?.maxTokens ?? null, modelMaxTokens: model.maxTokens, stop: "stop" });
 			assert(requests.length - phaseStart <= 8, `${phase}: unexpected request loop`);
@@ -335,11 +335,15 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 					return { sourceId: source.sourceId, quote, kind: quote === newPort ? "correction" : "constraint" };
 				});
 				const retire = phase === "correction" ? [{ evidenceId: retiredId, reason: "superseded", sourceId: quotes[0].sourceId, quote: newPort }] : [];
-				const message = fauxAssistantMessage(JSON.stringify({
-					summary: { task: "Verify bounded continuity on both Pi hosts", doneWhen: "Source and lifecycle assertions pass", constraints: ["No real model or file tools", "Latest user decisions govern"], established: ["Synthetic host fixture only"], open: [], next: ["Report mechanical verification, not semantic fidelity"] },
-					quotes, retire,
-				}));
-				return message;
+				return fauxAssistantMessage([{
+					type: "toolCall",
+					id: `continuity-${phase}-${calls("plugin")}`,
+					name: "submit_continuity",
+					arguments: {
+						summary: { task: "Verify bounded continuity on both Pi hosts", doneWhen: "Source and lifecycle assertions pass", constraints: ["No real model or file tools", "Latest user decisions govern"], established: ["Synthetic host fixture only"], open: [], next: ["Report mechanical verification, not semantic fidelity"] },
+						quotes, retire,
+					},
+				}], { stopReason: "toolUse" });
 			}
 			if (kind === "native") {
 				if (phase === "native-failure" || phase === "continue-native-failure") {
@@ -554,7 +558,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			start(name);
 			await session.prompt("/continuity");
 			await settle();
-			assert.equal(calls("plugin"), 1);
+			assert.equal(calls("plugin"), ["invalid-json", "empty"].includes(name) ? 3 : 1);
 			assert(calls("native") >= 1 && calls("native") <= 2, "native fallback may summarize both history and split-turn prefix");
 			assert.equal(calls("assistant"), 0);
 			assert.equal(continuationCount(), before);
@@ -571,7 +575,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			start(name);
 			await session.prompt("/continuity");
 			await settle();
-			assert.equal(calls("plugin"), 1);
+			assert.equal(calls("plugin"), name === "native-failure" ? 3 : 1);
 			assert.equal(calls("assistant"), 0);
 			assert.equal(continuationCount(), before);
 			assert.equal(branchCompaction().id, previous);
@@ -613,7 +617,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		start("continue-native-fallback");
 		await session.prompt("/continuity continue");
 		await settle();
-		assert.equal(calls("plugin"), 1);
+		assert.equal(calls("plugin"), 3);
 		assert(calls("native") >= 1 && calls("native") <= 2, "native fallback may summarize both history and split-turn prefix");
 		assert.equal(calls("assistant"), 1);
 		assert.equal(continuationCount(), beforeContinueFallback + 1);
@@ -628,7 +632,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			start(name);
 			await session.prompt("/continuity continue");
 			await settle();
-			assert.equal(calls("plugin"), 1);
+			assert.equal(calls("plugin"), name === "continue-native-failure" ? 3 : 1);
 			assert.equal(calls("assistant"), 0);
 			assert.equal(continuationCount(), before);
 			assert.equal(branchCompaction().id, previous);

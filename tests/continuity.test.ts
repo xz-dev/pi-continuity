@@ -79,12 +79,36 @@ function streamEvents(text: string, stopReason = "stop") {
 	return events;
 }
 
+function toolEvents(arguments_: Record<string, unknown>, name = "submit_continuity", stopReason = "toolUse") {
+	const events = createAssistantMessageEventStream();
+	const toolCall = { type: "toolCall", id: "tool-1", name, arguments: arguments_ } as const;
+	const delta = JSON.stringify(arguments_);
+	events.push({ type: "toolcall_start", contentIndex: 0, partial: undefined } as never);
+	events.push({ type: "toolcall_delta", contentIndex: 0, delta, partial: undefined } as never);
+	events.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: undefined } as never);
+	events.end({
+		role: "assistant",
+		content: [toolCall],
+		stopReason,
+		usage,
+		api: "openai-completions",
+		provider: "test",
+		model: "test-model",
+		timestamp: Date.now(),
+	} as never);
+	return events;
+}
+
 function fakeStream(text: string, stopReason = "stop") {
 	return vi.fn().mockImplementation(() => streamEvents(text, stopReason));
 }
 
+function fakeToolStream(arguments_: Record<string, unknown>, name = "submit_continuity", stopReason = "toolUse") {
+	return vi.fn().mockImplementation(() => toolEvents(arguments_, name, stopReason));
+}
+
 function successfulStream(model: unknown = summary) {
-	return fakeStream(JSON.stringify({ summary: model, quotes: [], retire: [] }));
+	return fakeToolStream({ summary: model, quotes: [], retire: [] });
 }
 
 function createFakeExtension(stream = successfulStream()) {
@@ -228,8 +252,8 @@ describe("host-derived extraction budgets", () => {
 		expect(JSON.parse(line.slice(8))).toEqual(expect.objectContaining({ generationAllowance: 1024, responseTarget: 1024 }));
 	});
 
-	it("checks the complete raw response before removing outer whitespace", async () => {
-		const stream = fakeStream(JSON.stringify({ summary, quotes: [], retire: [] }) + " ".repeat(9000));
+	it("checks the complete tool arguments against the raw safety bound", async () => {
+		const stream = successfulStream({ ...summary, task: "x".repeat(9000) });
 		const fake = createFakeExtension(stream);
 		const event = compactEvent("threshold");
 		event.preparation.settings.reserveTokens = 512;
@@ -252,7 +276,7 @@ describe("host-derived extraction budgets", () => {
 	});
 
 	it("preserves valid semantics when a proposal array exceeds its 32-record ceiling", async () => {
-		const stream = fakeStream(JSON.stringify({ summary, quotes: Array.from({ length: 33 }, () => ({ sourceId: "s0", quote: "Keep", kind: "task" })), retire: [] }));
+		const stream = fakeToolStream({ summary, quotes: Array.from({ length: 33 }, () => ({ sourceId: "s0", quote: "Keep", kind: "task" })), retire: [] });
 		const fake = createFakeExtension(stream);
 		const result: any = await before(fake)?.(compactEvent("threshold"), context());
 		expect(result.compaction.summary).toContain(renderSummary(summary));
@@ -260,8 +284,47 @@ describe("host-derived extraction budgets", () => {
 		expect(result.compaction.details.continuity.evidence).toEqual([]);
 	});
 
-	it.each(["empty", "length"])("does not commit, repair, or retry %s output", async (kind) => {
-		const stream = fakeStream(kind === "empty" ? " " : JSON.stringify({ summary, quotes: [], retire: [] }), kind === "length" ? "length" : "stop");
+	it("re-asks twice when the required tool is missing", async () => {
+		const stream = fakeStream("Use this JSON instead");
+		const fake = createFakeExtension(stream);
+		const ctx = context();
+		expect(await before(fake)?.(compactEvent("threshold"), ctx)).toBeUndefined();
+		expect(stream).toHaveBeenCalledTimes(3);
+		expect((stream.mock.calls[1]![1] as any).messages[0].content[0].text).toContain("did not call submit_continuity");
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("invalid-schema"), "warning");
+	});
+
+	it("accepts a valid tool after a wrong-tool retry and accumulates usage", async () => {
+		const stream = vi.fn()
+			.mockImplementationOnce(() => toolEvents({ value: "wrong" }, "other_tool"))
+			.mockImplementationOnce(() => toolEvents({ summary, quotes: [], retire: [] }));
+		const fake = createFakeExtension(stream);
+		const result: any = await before(fake)?.(compactEvent("threshold"), context());
+		expect(stream).toHaveBeenCalledTimes(2);
+		expect(result.compaction.summary).toContain(renderSummary(summary));
+		expect(result.compaction.usage).toEqual({ ...usage, input: 2, output: 2, totalTokens: 4 });
+	});
+
+	it("does not accept multiple or mixed tool calls as one form", async () => {
+		const stream = vi.fn().mockImplementation(() => {
+			const events = createAssistantMessageEventStream();
+			events.end({
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "tool-1", name: "submit_continuity", arguments: { summary, quotes: [], retire: [] } },
+					{ type: "toolCall", id: "tool-2", name: "other_tool", arguments: {} },
+				],
+				stopReason: "toolUse", usage, api: "openai-completions", provider: "test", model: "test-model", timestamp: Date.now(),
+			} as never);
+			return events;
+		});
+		const fake = createFakeExtension(stream);
+		expect(await before(fake)?.(compactEvent("threshold"), context())).toBeUndefined();
+		expect(stream).toHaveBeenCalledTimes(3);
+	});
+
+	it("does not retry a length-limited response", async () => {
+		const stream = fakeStream("", "length");
 		const fake = createFakeExtension(stream);
 		expect(await before(fake)?.(compactEvent("threshold"), context())).toBeUndefined();
 		expect(stream).toHaveBeenCalledOnce();
@@ -319,17 +382,15 @@ describe("extraction prompt and failure contract", () => {
 		expect(stream.mock.calls[0]![2]).not.toHaveProperty("maxTokens");
 	});
 
-	it.each(["missing-model", "auth-unavailable", "model-error", "empty-output", "incomplete-output", "invalid-json", "invalid-schema", "invalid-boundary", "input-budget", "semantic-budget"])("permits native fallback for %s, but continues only on a successful host callback", async (reason) => {
+	it.each(["missing-model", "auth-unavailable", "model-error", "incomplete-output", "invalid-schema", "invalid-boundary", "input-budget", "semantic-budget"])("permits native fallback for %s, but continues only on a successful host callback", async (reason) => {
 		const stream = successfulStream();
 		const ctx: any = context();
 		const event: any = compactEvent();
 		if (reason === "missing-model") ctx.model = undefined;
 		else if (reason === "auth-unavailable") ctx.modelRegistry.getApiKeyAndHeaders.mockRejectedValue(new Error("synthetic confidential auth error"));
 		else if (reason === "model-error") stream.mockImplementation(() => { throw new Error("synthetic confidential provider error"); });
-		else if (reason === "empty-output") stream.mockImplementation(() => streamEvents(" "));
-		else if (reason === "incomplete-output") stream.mockImplementation(() => streamEvents('{"summary":', "length"));
-		else if (reason === "invalid-json") stream.mockImplementation(() => streamEvents("synthetic confidential invalid output"));
-		else if (reason === "invalid-schema") stream.mockImplementation(() => streamEvents(JSON.stringify({ summary, quotes: [], retire: [], unexpected: true })));
+		else if (reason === "incomplete-output") stream.mockImplementation(() => streamEvents("", "length"));
+		else if (reason === "invalid-schema") stream.mockImplementation(() => toolEvents({ summary: { ...summary, task: "" }, quotes: [], retire: [] }));
 		else if (reason === "invalid-boundary") event.preparation.firstKeptEntryId = "absent";
 		else if (reason === "input-budget") ctx.model.contextWindow = 0;
 		else { event.preparation.settings.reserveTokens = 64; }
@@ -545,7 +606,7 @@ describe("Pi-scheduled compaction", () => {
 
 describe("source-backed continuation context", () => {
 	it("rejects a fabricated quotation without discarding valid semantic output", async () => {
-		const stream = fakeStream(JSON.stringify({ summary, quotes: [{ sourceId: "s0", quote: "可以部署", kind: "constraint" }], retire: [] }));
+		const stream = fakeToolStream({ summary, quotes: [{ sourceId: "s0", quote: "可以部署", kind: "constraint" }], retire: [] });
 		const fake = createFakeExtension(stream);
 		const result: any = await before(fake)?.(compactEvent("threshold"), context());
 		expect(result.compaction.summary).toContain(renderSummary(summary));
@@ -568,7 +629,7 @@ describe("source-backed continuation context", () => {
 			const prompt = input.messages[0].content[0].text as string;
 			const offered = prompt.split("\n").filter((line) => line.startsWith('{"sourceId":')).map((line) => JSON.parse(line))
 				.find((source) => source.text.includes(original));
-			return streamEvents(JSON.stringify({ summary, quotes: [{ sourceId: offered?.sourceId ?? "not-offered", quote: original, kind: "constraint" }], retire: [] }));
+			return toolEvents({ summary, quotes: [{ sourceId: offered?.sourceId ?? "not-offered", quote: original, kind: "constraint" }], retire: [] });
 		});
 		const fake = createFakeExtension(stream);
 		const event: any = compactEvent("threshold");
@@ -617,7 +678,7 @@ describe("persisted evidence across compactions", () => {
 			const lines = (input.messages[0].content[0].text as string).split("\n");
 			const sources = lines.filter((line) => line.startsWith('{"sourceId":')).map((line) => JSON.parse(line));
 			const carried = lines.filter((line) => line.startsWith('{"id":')).map((line) => JSON.parse(line));
-			return streamEvents(JSON.stringify({ summary: state, ...choose(sources, carried) }));
+			return toolEvents({ summary: state, ...choose(sources, carried) });
 		});
 		// A fresh extension instance for every round rules out process-local carry state.
 		const fake = createFakeExtension(stream);
@@ -665,7 +726,7 @@ describe("persisted evidence across compactions", () => {
 		const paths = Array.from({ length: 80 }, (_, i) => `src/${String(i).padStart(3, "0")}-${"path".repeat(16)}.ts`);
 		const stream = vi.fn().mockImplementation((_model: unknown, input: any) => {
 			const sources = (input.messages[0].content[0].text as string).split("\n").filter((line) => line.startsWith('{"sourceId":')).map((line) => JSON.parse(line));
-			return streamEvents(JSON.stringify({ summary, quotes: [{ sourceId: sources.find((source) => source.text === original).sourceId, quote: original, kind: "constraint" }], retire: [] }));
+			return toolEvents({ summary, quotes: [{ sourceId: sources.find((source) => source.text === original).sourceId, quote: original, kind: "constraint" }], retire: [] });
 		});
 		const fake = createFakeExtension(stream);
 		const event: any = compactEvent("threshold");
@@ -777,7 +838,7 @@ describe("persisted evidence across compactions", () => {
 		expect(visible(reloaded)).not.toContain("Sibling-only constraint.");
 	});
 
-	it.each(["missing-support", "old-user", "assistant-only", "malformed-reason"])("rejects %s retirement and carries the original", async (kind) => {
+	it.each(["old-user", "assistant-only"])("rejects structurally valid %s retirement and carries the original", async (kind) => {
 		const original = "Do not deploy.";
 		const session = await persisted(original);
 		const first = await compact(session, (sources) => ({ quotes: [{ sourceId: sources.find((source) => source.text === original).sourceId, quote: original, kind: "constraint" }], retire: [] }));
@@ -785,15 +846,25 @@ describe("persisted evidence across compactions", () => {
 		session.appendMessage({ role: "user", content: "The deployment restriction is lifted.", timestamp: 5 });
 		const result = await compact(session, (sources) => {
 			const older = sources.find((source) => source.entryId === ref.entryId);
-			const newer = sources.find((source) => source.text === "The deployment restriction is lifted.");
 			const citation = kind === "old-user" ? { sourceId: older.sourceId, quote: original }
-				: kind === "assistant-only" ? { sourceId: older.sourceId, quote: "Analysis started; no files modified." }
-				: kind === "missing-support" ? {} : { sourceId: newer.sourceId, quote: newer.text };
-			return { quotes: [], retire: [{ evidenceId: ref.id, reason: kind === "malformed-reason" ? ["satisfied"] : "satisfied", ...citation }] };
+				: { sourceId: older.sourceId, quote: "Analysis started; no files modified." };
+			return { quotes: [], retire: [{ evidenceId: ref.id, reason: "satisfied", ...citation }] };
 		});
 		expect(result.details.continuity.evidence).toEqual(first.details.continuity.evidence);
 		expect(result.details.continuity.coverage.retired).toBe(0);
 		expect(result.details.continuity.coverage.retirementsRejected).toBe(1);
+	});
+
+	it.each([
+		["missing-support", { evidenceId: "evidence-1", reason: "satisfied" }],
+		["malformed-reason", { evidenceId: "evidence-1", reason: ["satisfied"], sourceId: "s0", quote: "Done." }],
+	])("falls back immediately for %s retirement structure", async (_kind, retirement) => {
+		const stream = fakeToolStream({ summary, quotes: [], retire: [retirement] });
+		const fake = createFakeExtension(stream);
+		const ctx = context();
+		expect(await before(fake)?.(compactEvent("threshold"), ctx)).toBeUndefined();
+		expect(stream).toHaveBeenCalledOnce();
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("invalid-schema"), "warning");
 	});
 
 	it("retires only the obsolete port after a newer user correction, preserving the other constraint", async () => {
@@ -1017,7 +1088,7 @@ describe("extraction progress", () => {
 	});
 
 	it("clears progress on extraction failure", async () => {
-		const fake = createFakeExtension(fakeStream(" "));
+		const fake = createFakeExtension(fakeToolStream({ summary: { ...summary, task: "" }, quotes: [], retire: [] }));
 		const ctx = context();
 		expect(await before(fake)?.(compactEvent("threshold"), ctx)).toBeUndefined();
 		expect(ctx.ui.setWidget.mock.calls.at(-1)).toEqual(["pi-continuity", undefined]);

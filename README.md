@@ -71,7 +71,7 @@ Pi's actual summary text contains the six semantic sections, **Original user evi
 
 ### Selected original evidence
 
-The model returns a `summary/quotes/retire` envelope. Code—not the model—establishes provenance:
+The model calls the synthesis-only `submit_continuity` tool with a schema-defined `summary/quotes/retire` envelope. Pi's shared tool validator checks that form; continuity code—not the model—then establishes provenance:
 
 - Sources are raw user text blocks on the current branch, before `convertToLlm`, using their original block indices. Assistant output, tool results and generated summaries are not user sources.
 - Selection must match one offered continuous window exactly. No trimming, whitespace normalization, gap joining or invented source paths is accepted. Offsets are absolute UTF-16 code units; invalid Unicode spans and overlong quotations are rejected, not shortened.
@@ -121,7 +121,7 @@ The plugin uses Pi's public token estimator, not an exact tokenizer guarantee. H
 
 ## Failure and cancellation
 
-All ordinary extraction failures allow Pi's native fallback: unavailable model/auth, provider error, empty or length-limited output, invalid JSON/schema, invalid source boundaries, and input/semantic/render budget failures. The plugin neither repairs partial JSON nor retries extraction. Individual bad quotations can be rejected while a valid semantic summary is committed, with coverage counts.
+All ordinary extraction failures allow Pi's native fallback: unavailable model/auth, provider error, length-limited output, invalid tool arguments/schema, invalid source boundaries, and input/semantic/render budget failures. Ordinary text and raw JSON are not accepted as continuity results. When the model omits `submit_continuity`, calls a different tool, or returns multiple tool calls, the plugin re-asks at most twice; exhausting those attempts falls back natively. A named tool call with invalid arguments is not repaired or retried. Individual structurally valid but unverifiable quotations can still be rejected while a valid semantic summary is committed, with coverage counts.
 
 An explicit host/user cancellation or provider `aborted` result is different: the extension does not intentionally fall back or continue that cancelled request. A missing replacement returned alongside an already-aborted host signal is not permission to restart work.
 
@@ -142,12 +142,12 @@ Mechanically verified host revisions:
 
 | Host | Pi version | Commit |
 | --- | --- | --- |
-| `earendil-works/pi` | 0.85.1 | `b2602be77cb7b0de45dd616407fd210daa48aa75` |
-| `xz-dev/pi` | 0.85.1 | `e88a9b4b9a26d73042defa261ab486d7c4e15093` |
+| `earendil-works/pi` | 0.85.1 | `f9bcd351dc3cedf989bc5fc0f8aa012db5737df2` |
+| `xz-dev/pi` | 0.85.1 | `5b3df0ae01f0184fa746d6c78df1eec6873202ab` |
 
 The scenarios cover default compact-only and explicit compact-and-continue manual behavior, explicit user-request context after default commits, commit-before-continuation ordering, three compactions and fresh-extension JSONL reload, exact evidence and files in later model context, corrections, sibling isolation, native-gap reconstruction, mode-specific native fallback success/failure, cancellation, duplicate commands, auth/usage, and automatic ownership. Each host run has a host-specific faux request receipt; at the **faux response factory after SDK normalization**, plugin requests have no `maxTokens` value and native requests have `13107`; this is not an HTTP-wire measurement or a statement about every provider. The threshold fixture changes the model window after the host's pre-prompt check to exercise scheduling; it is not a live capacity benchmark.
 
-The [synthetic corpus](tests/fixtures/README.md) defines nine histories, expected source/state annotations and next-action outcomes after at least three compactions and reload. Deterministic tests validate its structure, not model choices. **Real-model semantic fidelity and the baseline/candidate/Hermes behavioral comparison have not been verified.** They require separately approved model access, data and cost. Wrong continuation behavior fails that evaluation even when source copying, JSON validation and persistence pass.
+The [synthetic corpus](tests/fixtures/README.md) defines nine histories, expected source/state annotations and next-action outcomes after at least three compactions and reload. Deterministic tests validate its structure, not model choices. **Real-model semantic fidelity and the baseline/candidate/Hermes behavioral comparison have not been verified.** They require separately approved model access, data and cost. Wrong continuation behavior fails that evaluation even when source copying, tool-schema validation and persistence pass.
 
 ## Reference choices
 
