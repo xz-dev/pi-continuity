@@ -268,6 +268,9 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 	const widgetEvents = [];
 	const requests = [];
 	const callbackFailures = [];
+	const preparations = [];
+	let recapFixture;
+	let toolExecutions = 0;
 	const rootConstraint = '只分析，不修改文件。\n  Keep "quoted" user text exactly.';
 	const oldPort = "Use port 8080.";
 	const newPort = "Use port 8081 instead of port 8080.";
@@ -302,16 +305,55 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		manager.appendMessage({ role: "toolResult", toolCallId, toolName: "write", content: [{ type: "text", text: "Synthetic write observation." }], isError: false, timestamp: Date.now() });
 		session.agent.state.messages = manager.buildSessionContext().messages;
 	}
+	function assertRecap(compact) {
+		assert.equal(compact.summary.match(/^## Latest model step \(/gm)?.length, 1, "one host-appended recap only");
+		assert(compact.summary.indexOf("## Latest model step (") > compact.summary.indexOf("## Retention coverage"));
+		if (!recapFixture) return;
+		const { mode, projection, assistantId, resultId, callId } = recapFixture;
+		assert(compact.summary.includes(`## Latest model step (${mode})`));
+		for (const locator of [manager.getSessionFile(), assistantId, resultId, callId]) assert(compact.summary.includes(locator), `missing recovery locator ${locator}`);
+		const content = mode === "AI summary" ? "AI fixture: attempted test; final failure observed; repair remains unverified."
+			: mode === "excerpts" ? `${projection.slice(0, 4000)}\n... [middle omitted] ...\n${projection.slice(-8000)}` : projection;
+		assert(compact.summary.endsWith(content), `${phase}: exact original/AI/excerpt content must end the summary`);
+		if (mode === "excerpts") {
+			assert.equal(codingAgent.estimateTokens({ role: "user", content: projection.slice(0, 4000), timestamp: 0 }), 1000);
+			assert.equal(codingAgent.estimateTokens({ role: "user", content: projection.slice(-8000), timestamp: 0 }), 2000);
+			assert(compact.summary.includes(`${projection.length - 12000} UTF-16 code units omitted`));
+			assert(!compact.summary.includes("MIDDLE-ONLY-OBSERVATION"));
+		}
+		assert.equal(manager.getEntries().filter((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolCallId === callId).length, 1, "historical tool result must not be replayed");
+	}
 	async function respond(context, options, _state, model) {
 		try {
-			const system = JSON.stringify(context.systemPrompt ?? "");
+			const systemMessages = context.messages.filter((message) => message.role === "system");
+			const system = context.systemPrompt ?? textOf({ messages: systemMessages });
+			const tools = context.tools ?? systemMessages.flatMap((message) => message.toolsAdded ?? []);
 			const text = textOf(context);
-			const kind = system.includes("Call submit_continuity exactly once") ? "plugin"
+			const kind = tools.some((tool) => tool.name === "submit_continuity") ? "plugin"
+				: system.includes("Summarize one historical model step") ? "recap"
 				: system.includes("context summarization assistant") ? "native" : "assistant";
-			requests.push({ phase, kind, maxTokens: options?.maxTokens ?? null, modelMaxTokens: model.maxTokens, stop: "stop" });
+			requests.push({ phase, kind, tools: tools.map((tool) => tool.name), maxTokens: options?.maxTokens ?? null, modelMaxTokens: model.maxTokens, stop: "stop" });
 			assert(requests.length - phaseStart <= 8, `${phase}: unexpected request loop`);
+			if (kind === "recap") {
+				assert.equal(options?.apiKey, "host-e2e-faux-key", "auxiliary request must reuse runtime auth");
+				assert.equal(tools.length, 0, "auxiliary recap has no submit_continuity or executable tools");
+				assert(options.maxTokens > 0 && options.maxTokens <= 3000, "auxiliary output allowance is bounded");
+				assert(recapFixture, "unexpected auxiliary request");
+				assert(text.includes(recapFixture.projection), "auxiliary input must include full raw projection, including true tool tail");
+				if (recapFixture.mode === "excerpts") {
+					requests.at(-1).stop = "error";
+					return fauxAssistantMessage([], { stopReason: "error", errorMessage: "HTTP 400 synthetic recap failure" });
+				}
+				return fauxAssistantMessage("AI fixture: attempted test; final failure observed; repair remains unverified.");
+			}
 			if (kind === "plugin") {
+				assert.equal(options?.maxTokens, undefined, "main synthesis must not set maxTokens");
 				assert.equal(options?.apiKey, "host-e2e-faux-key", "compaction must reuse the runtime model auth");
+				if (recapFixture) {
+					const recap = text.split("<latest_model_step>\n")[1]?.split("\n</latest_model_step>")[0];
+					assertRecap({ summary: `## Retention coverage\n${recap}` });
+					assert(text.includes("<later_user_input>"));
+				}
 				if (phase === "cancel" || phase === "continue-cancel") {
 					session.abortCompaction();
 					requests.at(-1).stop = "aborted";
@@ -335,6 +377,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 					return { sourceId: source.sourceId, quote, kind: quote === newPort ? "correction" : "constraint" };
 				});
 				const retire = phase === "correction" ? [{ evidenceId: retiredId, reason: "superseded", sourceId: quotes[0].sourceId, quote: newPort }] : [];
+				requests.at(-1).stop = "toolUse";
 				return fauxAssistantMessage([{
 					type: "toolCall",
 					id: `continuity-${phase}-${calls("plugin")}`,
@@ -391,6 +434,10 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 					assert(compact && !continuation, `${phase}: explicit user request must follow a committed compaction without a hidden continuation`);
 					assert(!text.includes("Continue the work represented by the just-committed continuity summary."), "explicit user request must not receive the removed continuation instruction");
 				}
+				assert(text.includes(compact.summary), `${phase}: later authorized request receives the full persisted summary`);
+				const summaryIndex = context.messages.findIndex((message) => textOf({ messages: [message] }).includes(compact.summary));
+				assert(summaryIndex >= 0 && summaryIndex < context.messages.length - 1, "committed summary precedes retained/later messages");
+				if (recapFixture) assertRecap(compact);
 				const persisted = (await readFile(manager.getSessionFile(), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
 				assert(persisted.some((entry) => entry.id === compact.id), `${phase}: compaction must be on disk before the assistant request`);
 				for (const ref of compact.details?.continuity?.evidence ?? []) {
@@ -444,6 +491,16 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		} while (session.isCompacting || session.isStreaming);
 		assert.deepEqual(callbackFailures, [], "faux provider assertions failed");
 		assert.equal(requests.length, faux.state.callCount, "every model call must reach the scripted provider boundary");
+		assert.equal(toolExecutions, 0, "compaction and continuation must not replay historical tools");
+		assert(manager.getEntries().filter((entry) => entry.type === "custom_message").every((entry) => entry.customType === "pi-continuity/continue"), "no separate recap replay message may be appended");
+		const prepared = preparations.findLast((item) => item.phase === phase);
+		const compact = branchCompaction();
+		if (prepared && compact && compact.id !== prepared.previousId) {
+			assert.equal(compact.firstKeptEntryId, prepared.firstKeptEntryId, `${phase}: preserve Pi's cut point`);
+			assert.equal(compact.tokensBefore, prepared.tokensBefore, `${phase}: preserve Pi's pre-compaction token count`);
+			if (compact.fromHook) assertRecap(compact);
+			else assert(!compact.summary.includes("## Latest model step ("), "native fallback must not claim a continuity recap");
+		}
 	}
 	let modelRuntime;
 	async function open(managerToOpen) {
@@ -455,7 +512,12 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		assert.deepEqual(loaded.errors, [], `${label}: packed extension loading failed`);
 		assert.equal(loaded.extensions.length, 1);
 		assert.equal(resolve(loaded.extensions[0].resolvedPath), resolve(pluginRoot, "extensions/continuity.ts"));
+		// Observe the actual host preparation without changing the event or replacement.
+		loaded.extensions[0].handlers.get("session_before_compact").unshift((event) => {
+			preparations.push({ phase, previousId: branchCompaction()?.id, firstKeptEntryId: event.preparation.firstKeptEntryId, tokensBefore: event.preparation.tokensBefore });
+		});
 		({ session } = await createAgentSession({ cwd: project, agentDir, model: faux.getModel(), modelRuntime, resourceLoader, sessionManager: manager, settingsManager, noTools: "all" }));
+		session.subscribe((event) => { if (event.type === "tool_execution_start") toolExecutions++; });
 		await session.bindExtensions({ uiContext: createNotifier(notifications, widgetEvents, () => phase) });
 	}
 	async function manual(name, quotes = [], previousId, command = "/continuity") {
@@ -466,6 +528,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		await session.prompt(command);
 		await settle();
 		assert.equal(calls("plugin"), 1, `${name}: exactly one plugin extraction`);
+		assert.equal(calls("recap"), recapFixture && recapFixture.mode !== "original" ? 1 : 0, `${name}: at most one oversized-step request, none for short steps`);
 		assert.equal(calls("native"), 0, `${name}: must not silently pass via native fallback`);
 		assert.equal(calls("assistant"), continuing ? 1 : 0, `${name}: unexpected assistant-turn count`);
 		assert.equal(continuationCount(), before + (continuing ? 1 : 0), `${name}: unexpected hidden-continuation count`);
@@ -477,6 +540,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		assert(reported.input > 0 && reported.output > 0, "persist the faux provider's normalized usage, not the factory placeholder");
 		assert.equal(reported.totalTokens, reported.input + reported.output + reported.cacheRead + reported.cacheWrite);
 		assertWidgetLifecycle(name);
+		assertRecap(compact);
 		return compact;
 	}
 	async function explicitTask(name, compact, quotes = []) {
@@ -493,6 +557,32 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		modelRuntime = await ModelRuntime.create({ modelsPath: null, allowModelNetwork: false });
 		modelRuntime.registerProvider(faux.getModel().provider, { name: "Faux", api: faux.api, apiKey: "HOST_E2E_FAUX_KEY", baseUrl: faux.getModel().baseUrl, models: faux.models });
 		await modelRuntime.setRuntimeApiKey(faux.getModel().provider, "host-e2e-faux-key", { allowNetwork: false });
+		for (const mode of ["original", "AI summary", "excerpts"]) {
+			await open(SessionManager.create(project, sessionDir));
+			seedUser("Inspect synthetic test result; never execute its historical call.");
+			const callId = `recap-${mode}`;
+			const text = "Attempt synthetic test.";
+			const output = mode === "original" ? "FINAL FAILURE: short observed result"
+				: "HEAD-RESULT\n" + "h".repeat(20000) + "MIDDLE-ONLY-OBSERVATION" + "t".repeat(40000) + "\nFINAL FAILURE: true original tool tail";
+			const assistantId = manager.appendMessage(fauxAssistantMessage([{ type: "text", text }, { type: "toolCall", id: callId, name: "bash", arguments: { command: "synthetic-test-never-execute" } }], { stopReason: "toolUse" }));
+			const resultId = manager.appendMessage({ role: "toolResult", toolCallId: callId, toolName: "bash", content: [{ type: "text", text: output }], isError: true, timestamp: Date.now() });
+			const projection = `${text}\n[Tool call ${JSON.stringify(callId)}: "bash"; attempt, not outcome]\n{"command":"synthetic-test-never-execute"}\n[Tool result for ${JSON.stringify(callId)}; error]\n${output}`;
+			recapFixture = { mode, projection, assistantId, resultId, callId };
+			const firstRecap = await manual(`recap-${mode}`);
+			const recapFile = manager.getSessionFile();
+			await open(SessionManager.open(recapFile));
+			assert.equal(branchCompaction().summary, firstRecap.summary, "recap survives JSONL reload exactly");
+			const reloadedBranch = manager.getBranch();
+			assert(reloadedBranch.findIndex((entry) => entry.id === assistantId) < reloadedBranch.findIndex((entry) => entry.id === firstRecap.firstKeptEntryId), "original assistant lies before the prior retained boundary");
+			assert(!manager.buildSessionContext().messages.some((message) => message.role === "assistant" && message.content.some((part) => part.type === "toolCall" && part.id === callId)), "original call is absent from rebuilt retained messages; reselection requires raw branch");
+			const repeated = await manual(`recap-${mode}-repeat`, [], firstRecap.id);
+			assert.equal(repeated.summary.split("## Latest model step (")[1], firstRecap.summary.split("## Latest model step (")[1], "repeated compaction uses same raw original across prior boundary");
+			assert(manager.getBranch().findIndex((entry) => entry.id === assistantId) < manager.getBranch().findIndex((entry) => entry.id === firstRecap.id));
+			await open(SessionManager.open(recapFile));
+			assert.equal(branchCompaction().summary, repeated.summary);
+			await explicitTask(`recap-${mode}-reloaded-task`, repeated);
+			recapFixture = undefined;
+		}
 		await open(SessionManager.create(project, sessionDir));
 		seedUser(original);
 		seedSyntheticWrite("fixture-write", fixturePath, "Synthetic preparation. ".repeat(100));
@@ -667,6 +757,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			await session.prompt(`Exercise host-owned ${name} recovery.`);
 			await settle();
 			assert.equal(calls("plugin"), 1, `${name}: Pi must schedule exactly one compaction`);
+			assert.equal(calls("recap"), 0, `${name}: short latest step needs no auxiliary request`);
 			assert.equal(calls("native"), 0);
 			assert.equal(calls("assistant"), name === "threshold" ? 1 : 2);
 			assert.equal(continuationCount(), before, "automatic paths must not add a plugin continuation");
@@ -674,8 +765,8 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			assert.equal(branchCompaction().fromHook, true);
 			assertWidgetLifecycle(name);
 		}
-		console.log(`[${label}] provider-boundary receipt ${JSON.stringify({ hostVersion, sha, boundary: "faux response factory after SDK normalization; not HTTP wire", requests })}`);
-		console.log(`[${label}] PASS at ${sha} (${hostVersion}): packed discovery; default compact-only and explicit compact-and-continue lifecycles; explicit user-request context; three rounds and JSONL reload; correction; branch isolation; native gap/fallback success and failure; cancellation/duplicate; threshold/overflow; auth/usage. Faux only; behavioral fidelity unverified.`);
+		console.log(`[${label}] provider-boundary receipt ${JSON.stringify({ hostVersion, sha, boundary: "faux response factory after SDK normalization; not HTTP wire", phases: new Set(requests.map((request) => request.phase)).size, toolExecutions, preparations, requests })}`);
+		console.log(`[${label}] PASS at ${sha} (${hostVersion}): packed discovery; original/AI/excerpt recap persistence, raw-step reselection across compactions, true 1000/2000 tool tail, no replay, unchanged host cut points; default compact-only and explicit compact-and-continue lifecycles; explicit user-request context; three rounds and JSONL reload; correction; branch isolation; native gap/fallback success and failure; cancellation/duplicate; threshold/overflow; auth/usage. Faux only; behavioral fidelity unverified.`);
 	} finally {
 		duplicateRelease?.();
 		session?.dispose();

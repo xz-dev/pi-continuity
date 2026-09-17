@@ -81,6 +81,24 @@ describe("continuity progress FSM", () => {
 		progress.leave();
 	});
 
+	it("starts another request after validation without creating another clock or retaining old response counts", () => {
+		const { ui, calls } = fakeUi();
+		const progress = createProgress(ui);
+		progress.prepared(100);
+		progress.receiving();
+		progress.delta(4000);
+		progress.rendering();
+		vi.advanceTimersByTime(1000);
+		progress.prepared(2000);
+		expect(calls.at(-1)![0]).toContain("prompt ~2.0k tokens · 1s");
+		progress.receiving();
+		vi.advanceTimersByTime(1000);
+		expect(calls.at(-1)![0]).toContain("receiving summary · ~0 tokens · 2s");
+		expect(vi.getTimerCount()).toBe(1);
+		progress.leave();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
 	it("counts only positive finite delta characters", () => {
 		const { ui, calls } = fakeUi();
 		const progress = createProgress(ui);

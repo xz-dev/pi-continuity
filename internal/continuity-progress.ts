@@ -2,7 +2,8 @@
  * Transient compaction-extraction progress for the interactive TUI.
  *
  * Finite state machine per extraction: PREPARING -> AWAITING -> RECEIVING ->
- * RENDERING, and every path (success, failure, cancel, host failure) ends in
+ * RENDERING. RENDERING -> AWAITING starts another request in the same lifetime;
+ * every path (success, failure, cancel, host failure) ends in
  * the single terminal state END, which releases everything (interval stopped,
  * widget cleared) and has no outgoing transitions. The instance is discarded
  * after END; a new extraction constructs a new machine. Nothing is persisted.
@@ -20,7 +21,7 @@ export interface ProgressUi {
 
 export interface ContinuityProgress {
 	readonly state: ProgressState;
-	/** PREPARING -> AWAITING, recording the estimated prompt size. */
+	/** PREPARING|RENDERING -> AWAITING, recording this request's estimated prompt size. */
 	prepared(promptTokens: number): void;
 	/** AWAITING -> RECEIVING on the first provider stream event. */
 	receiving(): void;
@@ -76,7 +77,8 @@ export function createProgress(ui: ProgressUi, now: () => number = Date.now): Co
 	return {
 		get state() { return state; },
 		prepared(tokens: number) {
-			if (state !== "preparing") return;
+			if (state !== "preparing" && state !== "rendering") return;
+			receivedChars = 0;
 			promptTokens = tokens;
 			transition("awaiting");
 		},

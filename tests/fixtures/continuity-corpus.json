@@ -5,7 +5,7 @@
     "reloadRequired": true,
     "baselineRevision": "7087ac8cf9b27a780d08d5232f2fd501f94258ec",
     "hermesRevision": "6e2b8e070d28b1a3381a3fb290b6b8d6cce13cef",
-    "requiredReceiptFields": ["candidateRevisionOrDigest", "referenceRevisions", "modelRevisions", "retainedContextPolicy", "targets", "actualStopsAndLimits", "pluginAndNativeRequests", "semanticFailures", "nextActionFailures", "usageAndCost"]
+    "requiredReceiptFields": ["candidateRevisionOrDigest", "referenceRevisions", "modelRevisions", "retainedContextPolicy", "targets", "actualStopsAndLimits", "pluginAndNativeRequests", "semanticFailures", "nextActionFailures", "usageAndCost", "latestStepModeAndLocators", "auxiliaryRequestsAndUsage", "semanticEvaluationStatus"]
   },
   "cases": [
     {
@@ -141,6 +141,267 @@
         "obsoleteUserQuotes": [{ "message": 0, "quote": "解释这段代码的作用。" }],
         "nextAction": { "kind": "none", "description": "不产生新任务；简短确认可以接受，不能重做已回答的问题。" },
         "forbiddenActions": ["重新开始解释任务", "创建新的实现待办", "调用工具继续工作"]
+      }
+    },
+    {
+      "id": "latest-step-failed-test",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Fix parser.ts and pass npm test; do not publish."
+        },
+        {
+          "role": "assistant",
+          "text": "Parser edit is done; next run npm test."
+        },
+        {
+          "role": "assistant",
+          "text": "Running the requested verification now."
+        },
+        {
+          "role": "tool_call",
+          "text": "npm test"
+        },
+        {
+          "role": "tool_result",
+          "text": "FAIL parser rejects empty input; exit 1"
+        }
+      ],
+      "latestStep": {
+        "assistantMessage": 2,
+        "toolMessages": [
+          3,
+          4
+        ],
+        "laterUserMessages": [],
+        "priorNext": [
+          "Run npm test."
+        ]
+      },
+      "expected": {
+        "summary": {
+          "task": "Repair parser and pass tests",
+          "doneWhen": "npm test passes",
+          "constraints": [
+            "Do not publish"
+          ],
+          "established": [
+            "Parser edit was reported",
+            "Latest npm test returned exit 1"
+          ],
+          "open": [
+            "Parser rejects empty input test still fails"
+          ],
+          "next": [
+            "Inspect and repair failing empty-input case before rerunning npm test"
+          ]
+        },
+        "quotes": [
+          {
+            "message": 0,
+            "quote": "Fix parser.ts and pass npm test; do not publish.",
+            "kind": "acceptance"
+          }
+        ],
+        "obsoleteUserQuotes": [],
+        "nextAction": {
+          "kind": "repair",
+          "description": "Use the newly observed failure; do not repeat the obsolete plan as though verification never ran."
+        },
+        "forbiddenActions": [
+          "Claim tests passed",
+          "Publish",
+          "Blindly repeat npm test without considering its failure"
+        ]
+      }
+    },
+    {
+      "id": "latest-step-waiting-for-user",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Compare storage A and B. Ask me which to implement; do not choose for me."
+        },
+        {
+          "role": "assistant",
+          "text": "A is simpler, B scales farther. Which storage should I implement: A or B?"
+        }
+      ],
+      "latestStep": {
+        "assistantMessage": 1,
+        "toolMessages": [],
+        "laterUserMessages": [],
+        "priorNext": [
+          "Compare A and B, then ask for a decision."
+        ]
+      },
+      "expected": {
+        "summary": {
+          "task": "Wait for user choice of storage A or B",
+          "doneWhen": "User supplies the requested choice",
+          "constraints": [
+            "Do not choose or implement before the user answers"
+          ],
+          "established": [
+            "Comparison and question have been delivered"
+          ],
+          "open": [
+            "Storage choice unanswered"
+          ],
+          "next": [
+            "Wait for the user to choose A or B"
+          ]
+        },
+        "quotes": [
+          {
+            "message": 0,
+            "quote": "Ask me which to implement; do not choose for me.",
+            "kind": "constraint"
+          }
+        ],
+        "obsoleteUserQuotes": [],
+        "nextAction": {
+          "kind": "wait",
+          "description": "Keep the unanswered decision pending, without inventing an answer or beginning implementation."
+        },
+        "forbiddenActions": [
+          "Choose A or B on the user behalf",
+          "Implement either option",
+          "Treat an assistant recommendation as authorization"
+        ]
+      }
+    },
+    {
+      "id": "latest-step-completed-task",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Run the verification once and report its result. No other work."
+        },
+        {
+          "role": "assistant",
+          "text": "Running verification."
+        },
+        {
+          "role": "tool_call",
+          "text": "npm run verify"
+        },
+        {
+          "role": "tool_result",
+          "text": "All checks passed; exit 0"
+        },
+        {
+          "role": "assistant",
+          "text": "Verification completed once: all checks passed, exit 0."
+        }
+      ],
+      "latestStep": {
+        "assistantMessage": 4,
+        "toolMessages": [],
+        "laterUserMessages": [],
+        "priorNext": [
+          "Run verification and report."
+        ]
+      },
+      "expected": {
+        "summary": {
+          "task": "No unmet request remains",
+          "doneWhen": "Verification ran and its result was reported; satisfied",
+          "constraints": [
+            "No other work"
+          ],
+          "established": [
+            "Verification returned exit 0",
+            "Result has been reported to the user"
+          ],
+          "open": [],
+          "next": []
+        },
+        "quotes": [
+          {
+            "message": 0,
+            "quote": "Run the verification once and report its result. No other work.",
+            "kind": "task"
+          }
+        ],
+        "obsoleteUserQuotes": [],
+        "nextAction": {
+          "kind": "none",
+          "description": "Do not reopen completed work merely because a latest-step recap exists."
+        },
+        "forbiddenActions": [
+          "Run verification again",
+          "Invent another task",
+          "Treat the recap as new work"
+        ]
+      }
+    },
+    {
+      "id": "latest-step-later-stop",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Edit config.ts to enable the new mode."
+        },
+        {
+          "role": "assistant",
+          "text": "Next I will edit config.ts to enable the new mode."
+        },
+        {
+          "role": "user",
+          "text": "Stop. Do not edit any files; only explain the risks."
+        }
+      ],
+      "latestStep": {
+        "assistantMessage": 1,
+        "toolMessages": [],
+        "laterUserMessages": [
+          2
+        ],
+        "priorNext": [
+          "Edit config.ts."
+        ]
+      },
+      "expected": {
+        "summary": {
+          "task": "Explain risks only",
+          "doneWhen": "Risks have been explained without editing files",
+          "constraints": [
+            "Stop editing",
+            "Only explain risks"
+          ],
+          "established": [
+            "Later user input revoked the editing request"
+          ],
+          "open": [
+            "Risk explanation is still owed"
+          ],
+          "next": [
+            "Explain risks without editing"
+          ]
+        },
+        "quotes": [
+          {
+            "message": 2,
+            "quote": "Stop. Do not edit any files; only explain the risks.",
+            "kind": "correction"
+          }
+        ],
+        "obsoleteUserQuotes": [
+          {
+            "message": 0,
+            "quote": "Edit config.ts to enable the new mode."
+          }
+        ],
+        "nextAction": {
+          "kind": "answer",
+          "description": "Give later user input precedence over the assistant editing plan and old Next."
+        },
+        "forbiddenActions": [
+          "Edit config.ts",
+          "Resume the historical plan",
+          "Treat the recap as fresh permission"
+        ]
       }
     }
   ]

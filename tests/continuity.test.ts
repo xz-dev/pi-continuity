@@ -7,6 +7,7 @@ import { convertToLlm, SessionManager, type ExtensionAPI } from "@earendil-works
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createContinuityExtension, parseSummary, renderSummary, type ContinuitySummary } from "../internal/continuity-core.js";
 import { prepareEvidence, renderEvidence, selectEvidence, textTokens } from "../internal/continuity-evidence.js";
+import { renderLatestStep, selectLatestStep, STEP_CONTENT_TOKENS } from "../internal/continuity-step.js";
 
 const summary: ContinuitySummary = {
 	task: "Ship the standalone package",
@@ -131,6 +132,300 @@ function before(fake: ReturnType<typeof createFakeExtension>) {
 	return fake.handlers.get("session_before_compact")?.[0];
 }
 
+function latestStepEvent(text = "Original tool log. ".repeat(1000), later = "Stop editing. Explain the failed test only.") {
+	const event: any = compactEvent("threshold");
+	event.branchEntries.push(
+		{ type: "message", id: "assistant-step", message: { role: "assistant", content: [{ type: "toolCall", id: "run-tests", name: "bash", arguments: { command: "npm test" } }], stopReason: "toolUse" } },
+		{ type: "message", id: "test-result", message: { role: "toolResult", toolCallId: "run-tests", content: [{ type: "text", text }], isError: true } },
+		{ type: "message", id: "later-user", message: { role: "user", content: later } },
+	);
+	return event;
+}
+
+describe("latest-step synthesis integration", () => {
+	it("summarizes one oversized original step before extracting six fields, with newer input separate", async () => {
+		const stream = vi.fn()
+			.mockImplementationOnce(() => streamEvents("Tests failed; wait for user decision. Do not edit."))
+			.mockImplementationOnce(() => toolEvents({ summary, quotes: [], retire: [] }));
+		const fake = createFakeExtension(stream);
+		const event = latestStepEvent();
+		const result: any = await before(fake)?.(event, context());
+		expect(stream).toHaveBeenCalledTimes(2);
+		const auxiliary = stream.mock.calls[0]![1] as any;
+		const main = stream.mock.calls[1]![1] as any;
+		expect(auxiliary.tools).toBeUndefined();
+		expect(auxiliary.messages[0].content[0].text).toContain(event.branchEntries[2].message.content[0].text);
+		expect(main.messages[0].content[0].text).toContain("Tests failed; wait for user decision.");
+		for (const input of [auxiliary, main]) {
+			expect(input.messages[0].content[0].text).toContain('<later_user_input>');
+			expect(input.messages[0].content[0].text).toContain("Stop editing. Explain the failed test only.");
+		}
+		expect(main.tools.map((tool: any) => tool.name)).toEqual(["submit_continuity"]);
+		expect(Object.keys(main.tools[0].parameters.properties)).toEqual(["summary", "quotes", "retire"]);
+		expect(Object.keys(main.tools[0].parameters.properties.summary.properties)).toEqual(["task", "doneWhen", "constraints", "established", "open", "next"]);
+		expect(result.compaction.firstKeptEntryId).toBe(event.preparation.firstKeptEntryId);
+		expect(result.compaction.summary).toContain("## Latest model step (AI summary)");
+		expect(result.compaction.summary).toContain("Assistant entry: \"assistant-step\"");
+		expect(result.compaction.summary.indexOf("## Latest model step")).toBeGreaterThan(result.compaction.summary.indexOf("## Retention coverage"));
+		expect(result.compaction.usage.totalTokens).toBe(4);
+		expect(fake.sendMessage).not.toHaveBeenCalled();
+	});
+
+	it.each(["throw", "empty", "length", "error", "oversize", "tool", "mixed"])("uses full original excerpts after auxiliary %s, without retry or tool execution", async (kind) => {
+		const event = latestStepEvent("HEAD " + "log😀\n".repeat(6000) + "FINAL FAILURE");
+		const expected = renderLatestStep(selectLatestStep(event.branchEntries));
+		const stream = vi.fn().mockImplementationOnce(() => {
+			if (kind === "throw") throw new Error("PRIVATE PROVIDER FAILURE");
+			if (kind === "tool") return toolEvents({ command: "do-not-execute" }, "bash");
+			if (kind === "mixed") {
+				const events = toolEvents({}, "bash", "stop"); const result = events.result.bind(events);
+				events.result = async () => { const response = await result(); return { ...response, content: [...response.content, { type: "text", text: "Plausible recap" }] }; };
+				return events;
+			}
+			return streamEvents(kind === "empty" ? " \n" : kind === "oversize" ? "x".repeat(12001) : "partial text", ["length", "error"].includes(kind) ? kind : "stop");
+		}).mockImplementationOnce(() => toolEvents({ summary, quotes: [], retire: [] }));
+		const fake = createFakeExtension(stream);
+		const ctx = context();
+		const result: any = await before(fake)?.(event, ctx);
+		expect(stream).toHaveBeenCalledTimes(2);
+		expect(result.compaction.summary.endsWith(expected.text)).toBe(true);
+		expect(result.compaction.summary).toContain("FINAL FAILURE");
+		const [head, tail] = expected.content.split("\n... [middle omitted] ...\n");
+		expect(textTokens(head!)).toBe(1000);
+		expect(textTokens(tail!)).toBe(2000);
+		expect(JSON.stringify(ctx.ui.notify.mock.calls)).not.toContain("PRIVATE");
+		expect(result.compaction.usage.totalTokens).toBe(kind === "throw" ? 2 : 4);
+		expect(result.compaction.details.continuity.usageIncomplete).toBe(kind === "throw" ? true : undefined);
+		if (kind === "throw") expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("only reported requests"), "warning");
+		expect(fake.sendMessage).not.toHaveBeenCalled();
+	});
+
+	it("discloses SDK zero-placeholder usage after an auxiliary stream failure", async () => {
+		const event = latestStepEvent();
+		const stream = vi.fn().mockImplementationOnce(() => {
+			const events = streamEvents("Partial generated recap", "error");
+			const result = events.result.bind(events);
+			events.result = async () => ({ ...await result(), usage: { ...usage, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 } });
+			return events;
+		}).mockImplementationOnce(() => toolEvents({ summary, quotes: [], retire: [] }));
+		const fake = createFakeExtension(stream);
+		const ctx = context();
+		const result: any = await before(fake)?.(event, ctx);
+		expect(stream).toHaveBeenCalledTimes(2);
+		expect(result.compaction.summary.endsWith(renderLatestStep(selectLatestStep(event.branchEntries)).text)).toBe(true);
+		expect(result.compaction.usage).toEqual(usage);
+		expect(result.compaction.details.continuity.usageIncomplete).toBe(true);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("only reported requests"), "warning");
+		expect(fake.sendMessage).not.toHaveBeenCalled();
+	});
+
+	it("skips unrequestable original input and keeps real tool tail, without marking an unattempted request as unknown usage", async () => {
+		const event = latestStepEvent("HEAD " + "x".repeat(100000) + "REAL TOOL TAIL");
+		const stream = successfulStream();
+		const result: any = await before(createFakeExtension(stream))?.(event, { ...context(), model: { id: "test", contextWindow: 16000, maxTokens: 4000 } });
+		expect(stream).toHaveBeenCalledOnce();
+		expect(result.compaction.summary).toContain("REAL TOOL TAIL");
+		expect(result.compaction.summary).toContain("## Latest model step (excerpts)");
+		expect(result.compaction.details.continuity).not.toHaveProperty("usageIncomplete");
+	});
+
+	it.each(["short", "unavailable"])("%s step skips auxiliary request", async (kind) => {
+		const event = kind === "short" ? latestStepEvent("Exact short failure 中文😀") : compactEvent("threshold");
+		const stream = successfulStream();
+		const result: any = await before(createFakeExtension(stream))?.(event, context());
+		expect(stream).toHaveBeenCalledOnce();
+		expect(result.compaction.summary).toContain(`## Latest model step (${kind === "short" ? "original" : "unavailable"})`);
+		if (kind === "short") expect(result.compaction.summary).toContain("Exact short failure 中文😀");
+	});
+
+	it.each(["signal-before", "signal-during", "provider-aborted", "abort-throw"])("cancels %s without fallback/main request or late continuation", async (kind) => {
+		const controller = new AbortController();
+		const event = latestStepEvent(); event.reason = "manual"; event.signal = controller.signal;
+		const stream = vi.fn().mockImplementation(() => {
+			if (kind === "signal-during") controller.abort();
+			if (kind === "abort-throw") throw new DOMException("Aborted", "AbortError");
+			return streamEvents("partial", kind === "provider-aborted" ? "aborted" : "stop");
+		});
+		const fake = createFakeExtension(stream); const ctx = context();
+		await requestContinuity(fake, ctx, "continue");
+		if (kind === "signal-before") controller.abort();
+		const result = await before(fake)?.(event, ctx);
+		expect(result).toEqual(controller.signal.aborted ? undefined : { cancel: true });
+		expect(stream).toHaveBeenCalledTimes(kind === "signal-before" ? 0 : 1);
+		compactCallbacks(ctx)?.onComplete?.();
+		expect(fake.sendMessage).not.toHaveBeenCalled();
+		expect(ctx.ui.notify).not.toHaveBeenCalled();
+		expect(ctx.ui.setWidget.mock.calls.filter((call) => call[1] === undefined)).toHaveLength(1);
+	});
+
+	it("keeps native fallback when main extraction fails after successful auxiliary generation", async () => {
+		const stream = vi.fn().mockImplementationOnce(() => streamEvents("Useful recap"))
+			.mockImplementationOnce(() => streamEvents("private failure", "error"));
+		const ctx = context();
+		expect(await before(createFakeExtension(stream))?.(latestStepEvent(), ctx)).toBeUndefined();
+		expect(stream).toHaveBeenCalledTimes(2);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("model-error"), "warning");
+		expect(ctx.ui.setWidget.mock.calls.at(-1)?.[1]).toBeUndefined();
+	});
+
+	it("shares authorization and sums auxiliary plus main retry usage, with fresh uncached routes and one progress lifetime", async () => {
+		const stream = vi.fn().mockImplementationOnce(() => streamEvents("Useful recap"))
+			.mockImplementationOnce(() => streamEvents("main missing tool"))
+			.mockImplementationOnce(() => toolEvents({ summary, quotes: [], retire: [] }));
+		const ctx = context();
+		ctx.modelRegistry.getApiKeyAndHeaders.mockResolvedValue({ ok: true, apiKey: "secret", headers: { route: "header" }, env: { route: "env" } } as never);
+		const event = latestStepEvent();
+		const result: any = await before(createFakeExtension(stream))?.(event, ctx);
+		expect(ctx.modelRegistry.getApiKeyAndHeaders).toHaveBeenCalledOnce();
+		expect(result.compaction.usage).toEqual({ ...usage, input: 3, output: 3, totalTokens: 6 });
+		const ids = new Set();
+		for (const [model, input, options] of stream.mock.calls as any[]) {
+			expect(model).toBe(ctx.model);
+			expect(options).toMatchObject({ apiKey: "secret", headers: { route: "header" }, env: { route: "env" }, signal: event.signal, cacheRetention: "none" });
+			ids.add(options.sessionId);
+			const tokens = textTokens(input.systemPrompt) + textTokens(input.messages[0].content[0].text) + (input.tools ? textTokens(JSON.stringify(input.tools[0])) : 0);
+			expect(tokens + (options.maxTokens ?? 16384) + 4096).toBeLessThanOrEqual(ctx.model.contextWindow);
+		}
+		expect(ids.size).toBe(3);
+		expect((stream.mock.calls[0] as any[])[2].maxTokens).toBe(STEP_CONTENT_TOKENS);
+		expect((stream.mock.calls[1] as any[])[2]).not.toHaveProperty("maxTokens");
+		const lines = ctx.ui.setWidget.mock.calls.map((call) => call[1]?.[0]).filter(Boolean);
+		expect(lines.filter((line) => line.includes("preparing"))).toHaveLength(1);
+		expect(lines.filter((line) => line.includes("waiting for model"))).toHaveLength(3);
+		expect(ctx.ui.setWidget.mock.calls.filter((call) => call[1] === undefined)).toHaveLength(1);
+	});
+
+	it("sums reported nonzero costs and exposes missing auxiliary usage as partial in headless mode", async () => {
+		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		try {
+			const costUsage = { ...usage, cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 } };
+			for (const missing of [false, true]) {
+				const stream = vi.fn().mockImplementationOnce(() => {
+					const events = streamEvents("Recap"); const result = events.result.bind(events);
+					events.result = async () => ({ ...await result(), usage: missing ? undefined : costUsage } as never);
+					return events;
+				}).mockImplementationOnce(() => {
+					const events = toolEvents({ summary, quotes: [], retire: [] }); const result = events.result.bind(events);
+					events.result = async () => ({ ...await result(), usage: costUsage });
+					return events;
+				});
+				const result: any = await before(createFakeExtension(stream))?.(latestStepEvent(), { ...context(), hasUI: false });
+				expect(result.compaction.usage.cost.total).toBe(missing ? 10 : 20);
+				expect(result.compaction.details.continuity.usageIncomplete).toBe(missing ? true : undefined);
+			}
+			expect(stderr).toHaveBeenCalledExactlyOnceWith("[pi-continuity] Compaction usage includes only reported requests and may underestimate total usage/cost.\n");
+		} finally { stderr.mockRestore(); }
+	});
+
+	it("cancels a provider-aborted stream event even before a final result is supplied", async () => {
+		const stream = vi.fn().mockImplementation(() => {
+			const events = createAssistantMessageEventStream();
+			events.push({ type: "error", reason: "aborted", error: { stopReason: "aborted" } } as never);
+			return events;
+		});
+		const ctx = context();
+		expect(await before(createFakeExtension(stream))?.(latestStepEvent(), ctx)).toEqual({ cancel: true });
+		expect(stream).toHaveBeenCalledOnce();
+		expect(ctx.ui.setWidget.mock.calls.at(-1)?.[1]).toBeUndefined();
+	});
+
+	it("rejects an auxiliary recap that exceeds a smaller model output allowance, even below 3000 tokens", async () => {
+		const stream = vi.fn().mockImplementationOnce(() => streamEvents("x".repeat(2000)))
+			.mockImplementationOnce(() => toolEvents({ summary, quotes: [], retire: [] }));
+		const ctx = context(); ctx.model.maxTokens = 256;
+		const result: any = await before(createFakeExtension(stream))?.(latestStepEvent(), ctx);
+		expect(result.compaction.summary).toContain("## Latest model step (excerpts)");
+		expect((stream.mock.calls[0] as any[])[2].maxTokens).toBe(256);
+	});
+
+	it("accepts a recap exactly at content limit with additional scaffolding charged to final render", async () => {
+		const text = "s".repeat(12000);
+		const stream = vi.fn().mockImplementationOnce(() => streamEvents(text))
+			.mockImplementationOnce(() => toolEvents({ summary, quotes: [], retire: [] }));
+		const event = latestStepEvent();
+		const result: any = await before(createFakeExtension(stream))?.(event, context());
+		expect(result.compaction.summary).toContain("## Latest model step (AI summary)");
+		expect(result.compaction.summary.endsWith(text)).toBe(true);
+		expect(textTokens(result.compaction.summary)).toBeLessThanOrEqual(event.preparation.settings.reserveTokens);
+	});
+
+	it("includes later input in auxiliary requestability, skipping unsafe auxiliary without dropping corrections from main", async () => {
+		const later = "CORRECTION " + "c".repeat(24000);
+		const event = latestStepEvent("o".repeat(30000), later);
+		const ctx = context(); ctx.model.contextWindow = 20000; ctx.model.maxTokens = 3000;
+		const stream = successfulStream();
+		const result: any = await before(createFakeExtension(stream))?.(event, ctx);
+		expect(stream).toHaveBeenCalledOnce();
+		expect((stream.mock.calls[0] as any[])[1].messages[0].content[0].text).toContain(later);
+		expect(result.compaction.summary).toContain("## Latest model step (excerpts)");
+	});
+
+	it("makes no request without current authorization, and cleans progress", async () => {
+		const stream = successfulStream(); const ctx = context();
+		ctx.modelRegistry.getApiKeyAndHeaders.mockResolvedValue({ ok: false } as never);
+		expect(await before(createFakeExtension(stream))?.(latestStepEvent(), ctx)).toBeUndefined();
+		expect(stream).not.toHaveBeenCalled();
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("auth-unavailable"), "warning");
+		expect(ctx.ui.setWidget.mock.calls.at(-1)?.[1]).toBeUndefined();
+	});
+
+	it("declines a small reserve instead of shrinking promised fallback or semantic lists", async () => {
+		const event = latestStepEvent(); event.preparation.settings.reserveTokens = 3000;
+		const stream = vi.fn().mockImplementationOnce(() => streamEvents("", "error"))
+			.mockImplementationOnce(() => toolEvents({ summary, quotes: [], retire: [] }));
+		const ctx = context();
+		expect(await before(createFakeExtension(stream))?.(event, ctx)).toBeUndefined();
+		expect(stream).toHaveBeenCalledTimes(2);
+		const prompt = (stream.mock.calls[1] as any[])[1].messages[0].content[0].text;
+		expect(prompt).toContain(renderLatestStep(selectLatestStep(event.branchEntries)).content);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("render-budget"), "warning");
+	});
+
+	it.each([false, true])("never slices later corrections to fit input (overflow=%s)", async (overflow) => {
+		const correction = "lead ".repeat(1500) + "MIDDLE STOP: only explain." + " tail".repeat(1500);
+		const event = latestStepEvent("short original", correction);
+		const stream = successfulStream(); const ctx = context();
+		if (overflow) { ctx.model.contextWindow = 8500; ctx.model.maxTokens = 512; }
+		const result: any = await before(createFakeExtension(stream))?.(event, ctx);
+		if (overflow) {
+			expect(result).toBeUndefined(); expect(stream).not.toHaveBeenCalled();
+			expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("input-budget"), "warning");
+			// Same capacities fit without the correction: rejection is not caused by headroom alone.
+			const control: any = await before(createFakeExtension(stream))?.(latestStepEvent("short original", "short correction"), ctx);
+			expect(control.compaction).toBeDefined();
+		} else {
+			expect(result.compaction).toBeDefined();
+			expect((stream.mock.calls[0] as any[])[1].messages[0].content[0].text).toContain(correction);
+		}
+	});
+
+	it("rebuilds one recap from the same original on two compactions, not from previous recap text", async () => {
+		const event = latestStepEvent("original failure"); const stream = successfulStream();
+		const fake = createFakeExtension(stream);
+		const first: any = await before(fake)?.(event, context());
+		event.branchEntries.push({ id: "compaction-1", type: "compaction", firstKeptEntryId: event.preparation.firstKeptEntryId, summary: first.compaction.summary, details: first.compaction.details });
+		event.preparation.previousSummary = first.compaction.summary;
+		const second: any = await before(fake)?.(event, context());
+		expect(second.compaction.summary.match(/## Latest model step/g)).toHaveLength(1);
+		expect(second.compaction.summary.split("## Latest model step")[1]).toBe(first.compaction.summary.split("## Latest model step")[1]);
+		expect((stream.mock.calls[1] as any[])[1].systemPrompt).toContain("Do not reproduce prior recap sections");
+	});
+
+	it("excludes hidden reasoning/signatures in auxiliary and main inputs and recap", async () => {
+		const event = latestStepEvent();
+		const assistant = event.branchEntries[1].message;
+		assistant.content.unshift({ type: "thinking", thinking: "PRIVATE REASONING", thinkingSignature: "PRIVATE SIGNATURE" });
+		assistant.content.push({ type: "text", text: "Visible", textSignature: "PRIVATE TEXT SIGNATURE" });
+		event.preparation.messagesToSummarize = [assistant];
+		event.preparation.turnPrefixMessages = [assistant];
+		const stream = vi.fn().mockImplementationOnce(() => streamEvents("Visible recap"))
+			.mockImplementationOnce(() => toolEvents({ summary, quotes: [], retire: [] }));
+		const result: any = await before(createFakeExtension(stream))?.(event, context());
+		expect(JSON.stringify(stream.mock.calls)).not.toContain("PRIVATE");
+		expect(result.compaction.summary).not.toContain("PRIVATE");
+	});
+});
+
 describe("strict continuity summary", () => {
 	it("accepts only the bounded semantic summary shape", () => {
 		expect(parseSummary(JSON.stringify(summary))).toEqual(summary);
@@ -216,9 +511,9 @@ describe("host-derived extraction budgets", () => {
 	it("shrinks only the offered catalogue, retaining the prepared history", async () => {
 		const stream = successfulStream();
 		const fake = createFakeExtension(stream);
-		const ctx = { ...context(), model: { id: "test-model", contextWindow: 5800, maxTokens: 256 } };
+		const ctx = { ...context(), model: { id: "test-model", contextWindow: 6600, maxTokens: 256 } };
 		const event: any = compactEvent("threshold");
-		event.preparation.settings.reserveTokens = 512;
+		event.preparation.settings.reserveTokens = 800;
 		event.branchEntries[0].message.content = "u".repeat(4000);
 		event.preparation.messagesToSummarize = [{ role: "user", content: "Important prepared history must remain intact.", timestamp: 0 }];
 		const result: any = await before(fake)?.(event, ctx);
@@ -230,7 +525,8 @@ describe("host-derived extraction budgets", () => {
 		const prompt = input.messages[0].content[0].text;
 		expect(prompt).toContain("Important prepared history must remain intact.");
 		expect(prompt).not.toContain("u".repeat(4000));
-		expect(textTokens(input.systemPrompt) + textTokens(prompt) + 256 + 4096).toBeLessThanOrEqual(5800);
+		const correction = '<response_correction>Your previous response did not call submit_continuity. Call that tool now. Do not answer with text.</response_correction>';
+		expect(textTokens(input.systemPrompt) + textTokens(prompt + "\n\n" + correction) + textTokens(JSON.stringify(input.tools[0])) + 256 + 4096).toBeLessThanOrEqual(6600);
 	});
 
 	it.each([0, NaN, Infinity, undefined])("rejects missing/invalid reserve capacity %s before extraction", async (reserveTokens) => {
@@ -732,7 +1028,7 @@ describe("persisted evidence across compactions", () => {
 		const event: any = compactEvent("threshold");
 		event.branchEntries = session.getBranch();
 		event.preparation.firstKeptEntryId = kept;
-		event.preparation.settings.reserveTokens = 600;
+		event.preparation.settings.reserveTokens = 900;
 		event.preparation.fileOps = { read: new Set(), written: new Set(paths), edited: new Set() };
 		const result: any = await before(fake)?.(event, { ...context(), sessionManager: session });
 		expect(result?.compaction).toBeDefined();
@@ -742,7 +1038,7 @@ describe("persisted evidence across compactions", () => {
 		expect(value.details.continuity.coverage.evidenceBudgetOmitted).toBe(0);
 		expect(value.details.continuity.coverage.filesOmitted).toBeGreaterThan(0);
 		expect(value.summary).toContain(JSON.stringify(original));
-		expect(textTokens(value.summary)).toBeLessThanOrEqual(600);
+		expect(textTokens(value.summary)).toBeLessThanOrEqual(900);
 		const section = value.summary.split("## Files\n")[1].split("## Retention coverage")[0];
 		expect(textTokens(section)).toBeLessThanOrEqual(512);
 		expect(section.match(/^- Modified: /gm)!.length + value.details.continuity.coverage.filesOmitted).toBe(paths.length);
