@@ -50,7 +50,7 @@ The extension does not set thresholds or own automatic retries and queues. Ordin
 
 ## Progress display
 
-While extraction runs, the interactive TUI shows a transient widget above the editor: the current phase (preparing evidence, waiting for the model, receiving the summary, validating), elapsed seconds, and request/response size estimates (prompt tokens, then streamed response tokens). Nothing is persisted to the session, the summary, or any file; the widget is removed on every outcome—commit, failure with native fallback, cancellation, and compact-and-retry. Providers or gateways that buffer the whole response simply jump from waiting to the next phase instead of counting up. Print (`-p`) and JSON modes emit nothing.
+While extraction runs, the interactive TUI shows a transient widget above the editor: the current phase (preparing evidence, waiting for the model, receiving the summary, validating), elapsed seconds, and request/response size estimates (prompt tokens, then streamed response tokens). Nothing is persisted to the session, the summary, or any file; the widget is removed on every outcome—commit, failure with native fallback, cancellation, and compact-and-retry. Providers or gateways that buffer the whole response simply jump from waiting to the next phase instead of counting up. Print (`-p`) and JSON modes emit no progress widget; bounded failure or partial-usage warnings can still go to stderr.
 
 ## What the summary contains
 
@@ -67,7 +67,24 @@ The semantic state has exactly six fields:
 
 The extraction prompt distinguishes tool attempts from observed results, completed edits from passing tests, and a plan from approval. It asks the model to reconcile older state with newer corrections and stop signals. These are instructions to a model, not semantic correctness checks.
 
-Pi's actual summary text contains the six semantic sections, **Original user evidence**, **Files**, and **Retention coverage**. User quotations and file paths are JSON-escaped; decoding a quotation recovers its exact original text, including newlines, quotes and indentation. Putting data only in compaction `details` would not make it visible to a later explicit model request, so retained evidence and displayed files are rendered into the summary itself.
+Pi's actual summary text contains the six semantic sections, **Original user evidence**, **Files**, **Retention coverage**, then one **Latest model step** recap. User quotations and file paths are JSON-escaped; decoding a quotation recovers its exact original text, including newlines, quotes and indentation. Putting data only in compaction `details` would not make it visible to a later explicit model request, so retained evidence and displayed files are rendered into the summary itself.
+
+### Latest model step
+
+The recap selects the latest original assistant response anywhere on the current branch, including before a prior compaction, plus its available tool results matched by call ID. Parallel calls belong to one step. Failed, interrupted and missing-result states remain visible; a newer incomplete step is not replaced by an older successful one. Subsequent user messages are supplied separately to synthesis and take precedence over historical plans. A repeated compaction with no new response rebuilds from the same raw records, not the previous recap.
+
+| Mode | Content and request cost |
+| --- | --- |
+| Original | Available assistant text, tool arguments and result text copied without paraphrasing when the projection fits the initial **3000 estimated-token** content budget; no extra request |
+| AI summary | One auxiliary request to the current authorized model for an oversized, safely requestable step; accepted only as complete, nonempty text within the bounded output allowance |
+| Excerpts | Auxiliary failure, unusable output or unsafe input size uses up to **1000 head / 2000 tail estimated tokens** from the original projection, separated by `... [middle omitted] ...` |
+| Unavailable | No original assistant response is present; an explicit marker replaces a fabricated recap |
+
+The 3000-token threshold is an initial internal engineering choice, not a public setting or measured quality optimum. Scaffolding and locators consume additional shared budget. An oversized step can add one request, latency and provider cost per compaction; there is no auxiliary retry or cache across compactions. Its output has an explicit `maxTokens` allowance of at most 3000, further limited by generation headroom, and is checked locally. It has no `submit_continuity` tool. Main extraction still uses that dedicated tool and does not set `maxTokens`.
+
+Excerpts preserve the true original tool-output tail rather than a previously truncated serialization. They omit the middle, disclose its extent, and cannot establish what happened there. The recap carries available session-file, assistant/result-entry and call locators for inspection with existing tools; it performs no automatic retrieval. Long locator lists can themselves be omitted with a disclosure. In-memory sessions have no transcript file. Hidden reasoning, signatures, non-text payloads and tool details are excluded; non-text markers do not mean their contents were inspected.
+
+The recap persists inside the committed summary and survives reload. Pi's retained messages follow that summary in later authorized context; cut points and continuation ownership stay unchanged. The recap does not replay tools or add a separate continuation message. Assistant plans are not authorization, missing output is not success, and a valid AI recap is not a guarantee of faithful meaning or correct continuation.
 
 ### Selected original evidence
 
@@ -103,7 +120,7 @@ hermesTarget   = max(2000, min(floor(0.20*T), floor(0.05*C), 10000))
 responseTarget = min(hermesTarget, G)
 ```
 
-`responseTarget` is guidance, not a rejection threshold. A complete result above it is accepted if it fits the safety bounds. The plugin **does not pass an explicit `maxTokens` option**; SDK/provider/model limits still apply, and generation is not unlimited.
+`responseTarget` is guidance for main extraction, not a rejection threshold. A complete result above it is accepted if it fits the safety bounds. The **main extraction request does not pass an explicit `maxTokens` option**; SDK/provider/model limits still apply, and generation is not unlimited. The optional auxiliary recap request has the bounded allowance described above.
 
 | Bound | Value |
 | --- | --- |
@@ -117,13 +134,15 @@ responseTarget = min(hermesTarget, G)
 | Evidence / displayed files | Target ceilings 1536 / 512 estimated tokens, within remaining `R` |
 | Request headroom | `G + 4096`, in addition to the complete request and system prompt |
 
-The plugin uses Pi's public token estimator, not an exact tokenizer guarantee. History uses Pi's public serialization, including its own tool-output limits. The plugin reduces the extra source catalogue rather than adding separate history slicing. Rendering preserves complete semantic state and coverage/recovery scaffolding; if the total is too large, it reduces displayed files first, then whole quotations. It does not truncate semantic lists to manufacture success. If required content cannot fit, synthesis fails and Pi may fall back natively. These constants are initial choices, not proven semantic-quality optima.
+The plugin uses Pi's public token estimator, not an exact tokenizer guarantee. Main history uses Pi's public serialization, including its own tool-output limits; latest-step projection uses original branch records before those limits. Recap content/scaffolding and all later user input participate in request and rendered-summary bounds. The optional auxiliary request includes its full projection, separate later input, prompt and generation headroom. The plugin reduces the extra source catalogue rather than adding separate history slicing. Rendering preserves complete semantic state and coverage/recovery scaffolding; if the total is too large, it reduces displayed files first, then whole quotations. It does not truncate semantic lists, silently drop later corrections, or shrink the promised head/tail allocation to manufacture success. If required content cannot fit, synthesis fails with a bounded budget warning and Pi may fall back natively; that native result does not promise a latest-step recap. These constants are initial choices, not proven semantic-quality optima.
 
 ## Failure and cancellation
 
-All ordinary extraction failures allow Pi's native fallback: unavailable model/auth, provider error, length-limited output, invalid tool arguments/schema, invalid source boundaries, and input/semantic/render budget failures. Ordinary text and raw JSON are not accepted as continuity results. When the model omits `submit_continuity`, calls a different tool, or returns multiple tool calls, the plugin re-asks at most twice; exhausting those attempts falls back natively. A named tool call with invalid arguments is not repaired or retried. Individual structurally valid but unverifiable quotations can still be rejected while a valid semantic summary is committed, with coverage counts.
+Ordinary auxiliary recap failure uses disclosed excerpts and can still lead to a valid continuity commit. Failed main extraction still permits native fallback even after successful auxiliary generation. Available usage from auxiliary and main/retry requests is summed. If a request fails without usage, a successful commit sets `details.continuity.usageIncomplete: true` and emits a UI warning or headless stderr warning that reported usage/cost may be underestimated. Pi's native totals do not interpret this extension flag; a displayed total is not a measured full cost in that case.
 
-An explicit host/user cancellation or provider `aborted` result is different: the extension does not intentionally fall back or continue that cancelled request. A missing replacement returned alongside an already-aborted host signal is not permission to restart work.
+All ordinary main-extraction failures allow Pi's native fallback: unavailable model/auth, provider error, length-limited output, invalid tool arguments/schema, invalid source boundaries, and input/semantic/render budget failures. Ordinary text and raw JSON are not accepted as continuity results. When the model omits `submit_continuity`, calls a different tool, or returns multiple tool calls, the plugin re-asks at most twice; exhausting those attempts falls back natively. A named tool call with invalid arguments is not repaired or retried. Individual structurally valid but unverifiable quotations can still be rejected while a valid semantic summary is committed, with coverage counts.
+
+An explicit host/user cancellation or provider `aborted` result is different: the extension does not intentionally fall back or continue that cancelled request. Cancellation during the auxiliary request stops before excerpts or subsequent main synthesis. A missing replacement returned alongside an already-aborted host signal is not permission to restart work.
 
 Failures produce a bounded UI warning or one headless stderr line with a reason code. They do not create diagnostic chat messages or include raw provider errors, credentials or conversation text. Native fallback may make additional requests, has its own limits/retries, can itself fail, and does **not** guarantee source-verified retention. Conversely, a schema-valid but semantically wrong summary is not detected automatically and need not trigger fallback.
 
@@ -142,12 +161,12 @@ Mechanically verified host revisions:
 
 | Host | Pi version | Commit |
 | --- | --- | --- |
-| `earendil-works/pi` | 0.85.1 | `f9bcd351dc3cedf989bc5fc0f8aa012db5737df2` |
-| `xz-dev/pi` | 0.85.1 | `5b3df0ae01f0184fa746d6c78df1eec6873202ab` |
+| `earendil-works/pi` | 0.85.1 | `e4c75a73222ae2c72abb5f5314fa35ee8effc508` |
+| `xz-dev/pi` | 0.85.1 | `21d2fb3c9e5cdb12caa93f2884e8d0ebb0e6aeeb` |
 
-The scenarios cover default compact-only and explicit compact-and-continue manual behavior, explicit user-request context after default commits, commit-before-continuation ordering, three compactions and fresh-extension JSONL reload, exact evidence and files in later model context, corrections, sibling isolation, native-gap reconstruction, mode-specific native fallback success/failure, cancellation, duplicate commands, auth/usage, and automatic ownership. Each host run has a host-specific faux request receipt; at the **faux response factory after SDK normalization**, plugin requests have no `maxTokens` value and native requests have `13107`; this is not an HTTP-wire measurement or a statement about every provider. The threshold fixture changes the model window after the host's pre-prompt check to exercise scheduling; it is not a live capacity benchmark.
+The scenarios cover default compact-only and explicit compact-and-continue manual behavior, explicit user-request context after default commits, commit-before-continuation ordering, three compactions and fresh-extension JSONL reload, exact evidence and files in later model context, corrections, sibling isolation, native-gap reconstruction, mode-specific native fallback success/failure, cancellation, duplicate commands, auth/usage, and automatic ownership. Additional scenarios check original/AI-summary/excerpt recap persistence and reload, reselection of the same raw step across earlier compactions, exact 1000/2000 estimated-token head/tail content, unchanged host cut points, and absence of tool replay. Each host run prints a host-specific faux request receipt with phase, request kind, tools and output allowance; at the **faux response factory after SDK normalization**, main synthesis has no explicit `maxTokens`, auxiliary requests have a bounded allowance and no `submit_continuity`, and native requests retain their host-defined allowance. This is not an HTTP-wire measurement or a statement about every provider. The threshold fixture changes the model window after the host's pre-prompt check to exercise scheduling; it is not a live capacity benchmark.
 
-The [synthetic corpus](tests/fixtures/README.md) defines nine histories, expected source/state annotations and next-action outcomes after at least three compactions and reload. Deterministic tests validate its structure, not model choices. **Real-model semantic fidelity and the baseline/candidate/Hermes behavioral comparison have not been verified.** They require separately approved model access, data and cost. Wrong continuation behavior fails that evaluation even when source copying, tool-schema validation and persistence pass.
+The [synthetic corpus](tests/fixtures/README.md) defines thirteen histories, expected source/state annotations and next-action outcomes after at least three compactions and reload. Four latest-step examples cover newly failed tests, an unanswered user decision, already completed work, and a later stop instruction. Deterministic tests validate fixture structure and mocked prompt/render delivery, not model choices. **Real-model semantic fidelity and the baseline/candidate/Hermes behavioral comparison have not been verified.** They require separately approved model access, data and cost. Wrong continuation behavior fails that evaluation even when source copying, tool-schema validation and persistence pass.
 
 ## Reference choices
 
