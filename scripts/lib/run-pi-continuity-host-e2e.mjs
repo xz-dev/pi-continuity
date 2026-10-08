@@ -251,6 +251,29 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 		assert(value, `${label} does not export required public API ${name}`);
 	}
 	const hostVersion = JSON.parse(await readFile(join(hostRoot, "packages/coding-agent/package.json"), "utf8")).version;
+	// Test-only deep import: the extension itself needs only public convertToLlm.
+	const { transformMessages } = await import(pathToFileURL(join(hostRoot, "packages/ai/dist/api/transform-messages.js")));
+	const { isReplayEligible } = await import(pathToFileURL(join(pluginRoot, "internal/continuity-eligibility.ts")));
+	const eligibilityFixture = JSON.parse(await readFile(join(packageRoot, "tests/fixtures/replay-eligibility.json"), "utf8"));
+	const eligibilityCases = eligibilityFixture.cases.map((item, index) => ({ ...item,
+		message: { ...(item.message.role === "assistant" ? eligibilityFixture.assistant : {}), ...item.message, timestamp: index + 1 },
+	}));
+	const originals = eligibilityCases.map((item) => item.message);
+	const originalSnapshot = structuredClone(originals);
+	const replayModel = { id: "eligibility", provider: "test", api: "openai-completions", input: ["text"] };
+	const replay = transformMessages(codingAgent.convertToLlm(originals), replayModel);
+	const survives = (messages, original) => messages.some((message) => message.timestamp === original.timestamp);
+	const nativeDropsEmpty = !survives(replay, eligibilityCases.find((item) => item.name === "empty user").message);
+	for (const item of eligibilityCases) {
+		assert.equal(survives(replay, item.message), item.empty ? !nativeDropsEmpty : item.eligible, `native replay: ${item.name}`);
+		assert.equal(survives(transformMessages(codingAgent.convertToLlm([item.message]), replayModel), item.message), survives(replay, item.message), `singleton: ${item.name}`);
+		assert.equal(isReplayEligible(item.message), item.eligible, `continuity admission: ${item.name}`);
+	}
+	assert.deepEqual(originals, originalSnapshot);
+	assert(replay.some((message) => message.role === "toolResult" && message.toolCallId === "missing"));
+	assert(!originals.filter(isReplayEligible).some((message) => message.role === "toolResult" && message.toolCallId === "missing"));
+	const versions = Object.fromEntries(await Promise.all(["ai", "agent", "coding-agent"].map(async (name) => [name, JSON.parse(await readFile(join(hostRoot, `packages/${name}/package.json`), "utf8")).version])));
+	console.log(`[${label}] native eligibility receipt ${JSON.stringify({ versions, sha, cases: eligibilityCases.length, nativeDropsEmpty, intentionalEmptyDifferences: nativeDropsEmpty ? [] : eligibilityCases.filter((item) => item.empty).map((item) => item.name) })}`);
 	const project = join(workRoot, "project");
 	const agentDir = join(workRoot, "agent");
 	const sessionDir = join(workRoot, "sessions");
@@ -334,6 +357,18 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 				: system.includes("context summarization assistant") ? "native" : "assistant";
 			requests.push({ phase, kind, tools: tools.map((tool) => tool.name), maxTokens: options?.maxTokens ?? null, modelMaxTokens: model.maxTokens, stop: "stop" });
 			assert(requests.length - phaseStart <= 8, `${phase}: unexpected request loop`);
+			if (kind === "recap" || kind === "plugin") assert(!text.includes("EXCLUDED_"), `${phase}: excluded content reached continuity`);
+			if (kind === "plugin" && phase === "eligibility") {
+				for (const marker of ["ELIGIBLE_REQUEST", "NORMAL_REPLY", "REAL_TEST_FAILURE", "ELIGIBLE_LENGTH", "REAL_SHELL_FAILURE", "LATER_CORRECTION"]) {
+					assert(textOf({ messages: replay }).includes(marker), `native survivor absent: ${marker}`);
+					assert(text.includes(marker), `continuity survivor absent: ${marker}`);
+				}
+				assert(!text.includes("No result provided"), "protocol repair must not become execution evidence");
+				const recap = text.split("<latest_model_step>\n")[1]?.split("\n</latest_model_step>")[0];
+				assert(recap.includes("missing results: 1"));
+				assert(recap.includes("attempt.txt"));
+				assert(text.split("<later_user_input>")[1].includes("LATER_CORRECTION"));
+			}
 			if (kind === "recap") {
 				assert.equal(options?.apiKey, "host-e2e-faux-key", "auxiliary request must reuse runtime auth");
 				assert.equal(tools.length, 0, "auxiliary recap has no submit_continuity or executable tools");
@@ -567,6 +602,9 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			const assistantId = manager.appendMessage(fauxAssistantMessage([{ type: "text", text }, { type: "toolCall", id: callId, name: "bash", arguments: { command: "synthetic-test-never-execute" } }], { stopReason: "toolUse" }));
 			const resultId = manager.appendMessage({ role: "toolResult", toolCallId: callId, toolName: "bash", content: [{ type: "text", text: output }], isError: true, timestamp: Date.now() });
 			const projection = `${text}\n[Tool call ${JSON.stringify(callId)}: "bash"; attempt, not outcome]\n{"command":"synthetic-test-never-execute"}\n[Tool result for ${JSON.stringify(callId)}; error]\n${output}`;
+			manager.appendMessage(fauxAssistantMessage([{ type: "text", text: "EXCLUDED_RECAP_ERROR".repeat(3000) }], { stopReason: "error" }));
+			manager.appendMessage(fauxAssistantMessage([{ type: "text", text: "EXCLUDED_RECAP_ABORTED" }], { stopReason: "aborted" }));
+			seedUser("Later correction: do not rerun the test.");
 			recapFixture = { mode, projection, assistantId, resultId, callId };
 			const firstRecap = await manual(`recap-${mode}`);
 			const recapFile = manager.getSessionFile();
@@ -583,6 +621,19 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			await explicitTask(`recap-${mode}-reloaded-task`, repeated);
 			recapFixture = undefined;
 		}
+		await open(SessionManager.create(project, sessionDir));
+		const fixtureIds = eligibilityCases.map((item) => manager.appendMessage(item.message));
+		manager.appendMessage(fauxAssistantMessage([]));
+		seedUser("Keep the latest correction; no historical tool may run.");
+		const eligibleCompaction = await manual("eligibility", [eligibilityCases.at(-1).message.content]);
+		assert(eligibleCompaction.summary.includes(fixtureIds[eligibilityCases.findIndex((item) => item.name === "missing result")]));
+		assert.deepEqual(eligibleCompaction.details.modifiedFiles, ["attempt.txt"]);
+		assert.deepEqual(eligibleCompaction.details.readFiles, ["empty.txt"]);
+		assert(!eligibleCompaction.summary.includes("excluded-error.txt"));
+		assert(!eligibleCompaction.summary.includes("excluded-aborted.txt"));
+		assert.equal(eligibleCompaction.details.continuity.evidence[0].entryId, fixtureIds.at(-1));
+		assert.equal(eligibleCompaction.details.continuity.evidence[0].start, 0);
+		assert.equal(eligibleCompaction.details.continuity.evidence[0].end, eligibilityCases.at(-1).message.content.length);
 		await open(SessionManager.create(project, sessionDir));
 		seedUser(original);
 		seedSyntheticWrite("fixture-write", fixturePath, "Synthetic preparation. ".repeat(100));
@@ -766,7 +817,7 @@ async function exerciseLifecycle({ hostRoot, pluginRoot, workRoot, label, sha })
 			assertWidgetLifecycle(name);
 		}
 		console.log(`[${label}] provider-boundary receipt ${JSON.stringify({ hostVersion, sha, boundary: "faux response factory after SDK normalization; not HTTP wire", phases: new Set(requests.map((request) => request.phase)).size, toolExecutions, preparations, requests })}`);
-		console.log(`[${label}] PASS at ${sha} (${hostVersion}): packed discovery; original/AI/excerpt recap persistence, raw-step reselection across compactions, true 1000/2000 tool tail, no replay, unchanged host cut points; default compact-only and explicit compact-and-continue lifecycles; explicit user-request context; three rounds and JSONL reload; correction; branch isolation; native gap/fallback success and failure; cancellation/duplicate; threshold/overflow; auth/usage. Faux only; behavioral fidelity unverified.`);
+		console.log(`[${label}] PASS at ${sha} (${hostVersion}): packed discovery; native eligibility parity and approved empty-message differences; excluded partials absent from original/AI/excerpt recaps; raw-step reselection across compactions, true 1000/2000 tool tail, no replay, unchanged host cut points; default compact-only and explicit compact-and-continue lifecycles; explicit user-request context; three rounds and JSONL reload; correction; branch isolation; native gap/fallback success and failure; cancellation/duplicate; threshold/overflow; auth/usage. Faux only; behavioral fidelity unverified.`);
 	} finally {
 		duplicateRelease?.();
 		session?.dispose();

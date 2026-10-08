@@ -1,3 +1,4 @@
+import { isReplayEligible } from "./continuity-eligibility.js";
 import { createHash } from "node:crypto";
 import { estimateTokens, type SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 
@@ -104,7 +105,7 @@ export function prepareEvidence(event: SessionBeforeCompactEvent, budget = 6144)
 	};
 	const blocks = new Map<string, SourceBlock>();
 	entries.forEach((entry, branchOrder) => {
-		if (entry.type !== "message" || entry.message.role !== "user") return;
+		if (entry.type !== "message" || entry.message.role !== "user" || !isReplayEligible(entry.message)) return;
 		const content = entry.message.content;
 		const parts = typeof content === "string" ? [{ type: "text", text: content }] : content;
 		parts.forEach((part, blockIndex) => {

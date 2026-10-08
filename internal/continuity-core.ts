@@ -2,6 +2,7 @@ import { Type, type ToolCall, type Usage, uuidv7, validateToolCall } from "@eare
 import { stream } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
+import { isReplayEligible } from "./continuity-eligibility.js";
 import { prepareEvidence, reduceSources, renderEvidence, selectEvidence, textTokens, type EvidenceContext, type EvidenceCoverage, type EvidenceReference } from "./continuity-evidence.js";
 import { createProgress, type ContinuityProgress } from "./continuity-progress.js";
 import { renderLatestStep, selectLatestStep, STEP_CONTENT_TOKENS } from "./continuity-step.js";
@@ -205,7 +206,7 @@ function positiveInteger(value: number | undefined): value is number {
 }
 
 function historyText(messages: SessionBeforeCompactEvent["preparation"]["messagesToSummarize"]): string {
-	const visible = convertToLlm(messages.filter((message) => !(message.role === "custom" && message.customType === CONTINUE_TYPE)))
+	const visible = convertToLlm(messages.filter((message) => isReplayEligible(message) && !(message.role === "custom" && message.customType === CONTINUE_TYPE)))
 		.map((message) => message.role === "assistant" ? { ...message, content: message.content.filter((part) => part.type !== "thinking") } : message);
 	return serializeConversation(visible);
 }
@@ -375,7 +376,21 @@ async function synthesize(event: SessionBeforeCompactEvent, ctx: ExtensionContex
 }
 
 function fileDetails(event: SessionBeforeCompactEvent): { readFiles: string[]; modifiedFiles: string[] } {
-	const { read, written, edited } = event.preparation.fileOps;
+	const read = new Set<string>();
+	const written = new Set<string>();
+	const edited = new Set<string>();
+	// The host aggregate includes excluded attempts. Re-derive from original source regions.
+	for (const message of [...event.preparation.messagesToSummarize, ...event.preparation.turnPrefixMessages]) {
+		if (message.role !== "assistant" || !isReplayEligible(message) || !Array.isArray(message.content)) continue;
+		for (const block of message.content) {
+			if (!isRecord(block) || block.type !== "toolCall" || !isRecord(block.arguments)) continue;
+			const path = block.arguments.path;
+			if (typeof path !== "string" || !path) continue;
+			if (block.name === "read") read.add(path);
+			else if (block.name === "write") written.add(path);
+			else if (block.name === "edit") edited.add(path);
+		}
+	}
 	const latest = event.branchEntries.findLast((entry) => entry.type === "compaction");
 	const previous = latest?.type === "compaction" && isRecord(latest.details) ? latest.details : {};
 	const paths = (value: unknown): string[] => Array.isArray(value) ? value.filter((path): path is string => typeof path === "string" && path.length > 0) : [];

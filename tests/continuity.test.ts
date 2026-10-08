@@ -29,6 +29,14 @@ const usage = {
 
 type Handler = (event: any, ctx: any) => Promise<unknown> | unknown;
 
+const defaultFileOps = { read: new Set(["read-only.ts", "shared.ts"]), written: new Set(["written.ts", "shared.ts"]), edited: new Set(["edited.ts", "shared.ts"]) };
+function fileMessage(ops = defaultFileOps) {
+	return {
+		role: "assistant" as const, stopReason: "toolUse" as const, usage, api: "openai-completions" as const, provider: "test", model: "test-model", timestamp: 0,
+		content: Object.entries(ops).flatMap(([kind, paths]) => [...paths].map((path, i) => ({ type: "toolCall" as const, id: `${kind}-${i}`, name: kind === "written" ? "write" : kind === "edited" ? "edit" : "read", arguments: { path } }))),
+	};
+}
+
 function compactEvent(reason: "manual" | "threshold" | "overflow" = "manual", signal = new AbortController().signal) {
 	return {
 		type: "session_before_compact",
@@ -37,13 +45,13 @@ function compactEvent(reason: "manual" | "threshold" | "overflow" = "manual", si
 		signal,
 		branchEntries: [{ id: "entry-1", parentId: null, timestamp: new Date(0).toISOString(), type: "message", message: { role: "user", content: "Keep the existing task constraints.", timestamp: 0 } }],
 		preparation: {
-			messagesToSummarize: [],
+			messagesToSummarize: [fileMessage()],
 			turnPrefixMessages: [],
 			previousSummary: undefined,
 			firstKeptEntryId: "entry-1",
 			tokensBefore: 123,
 			settings: { enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 },
-			fileOps: { read: new Set(["read-only.ts", "shared.ts"]), written: new Set(["written.ts", "shared.ts"]), edited: new Set(["edited.ts", "shared.ts"]) },
+			fileOps: defaultFileOps,
 		},
 	};
 }
@@ -141,6 +149,85 @@ function latestStepEvent(text = "Original tool log. ".repeat(1000), later = "Sto
 	);
 	return event;
 }
+
+describe("replay-eligible continuity projections", () => {
+	it.each(["original", "AI summary", "excerpts"])("uses only original eligible material in %s requests, files and recaps", async (mode) => {
+		const correction = 'Stop editing.\n  Only explain "failure".';
+		const event = latestStepEvent(mode === "original" ? "REAL_FAILURE" : "REAL_FAILURE".repeat(2000), correction);
+		const excluded = ["error", "aborted"].map((stopReason) => ({ ...fileMessage({ read: new Set(), written: new Set([`EXCLUDED-${stopReason}.ts`, "shared.ts"]), edited: new Set() }), stopReason,
+			content: [{ type: "text", text: `EXCLUDED-${stopReason}`.repeat(2000) }, ...fileMessage({ read: new Set(), written: new Set([`EXCLUDED-${stopReason}.ts`, "shared.ts"]), edited: new Set() }).content] }));
+		event.branchEntries.splice(3, 0, ...excluded.map((message, i) => ({ type: "message", id: `excluded-${i}`, message })));
+		event.preparation.messagesToSummarize = [
+			{ role: "user", content: "ELIGIBLE_OLD_HISTORY", timestamp: 1 },
+			...event.branchEntries.slice(1).map((entry: any) => entry.message),
+			{ role: "bashExecution", command: "EXCLUDED_SHELL", output: "EXCLUDED_OUTPUT", excludeFromContext: true },
+			{ role: "bashExecution", command: "false", output: "REAL_SHELL_FAILURE", exitCode: 1 },
+		];
+		event.preparation.turnPrefixMessages = [{ role: "user", content: "SPLIT_TURN_REQUEST", timestamp: 2 }, ...excluded, fileMessage({ read: new Set(["shared.ts"]), written: new Set(["eligible.ts"]), edited: new Set() })];
+		event.preparation.fileOps = { read: new Set(), written: new Set(["EXCLUDED-error.ts", "EXCLUDED-aborted.ts", "aggregate-only.ts"]), edited: new Set() };
+		event.preparation.firstKeptEntryId = "later-user";
+		const original = structuredClone(event.branchEntries);
+		const stream = vi.fn().mockImplementation((_model, input) => {
+			if (!input.tools) return streamEvents(mode === "AI summary" ? "Real test failure; wait for the user's decision." : "UNACCEPTED AUXILIARY", mode === "AI summary" ? "stop" : "error");
+			const sources = input.messages[0].content[0].text.split("\n").filter((line: string) => line.startsWith('{"sourceId":')).map((line: string) => JSON.parse(line));
+			const source = sources.find((item: any) => item.text === correction);
+			return toolEvents({ summary, quotes: [{ sourceId: source.sourceId, quote: correction, kind: "correction" }], retire: [] });
+		});
+		const result: any = await before(createFakeExtension(stream))?.(event, context());
+		expect(result?.compaction).toBeDefined();
+		const value = result.compaction;
+		expect(stream).toHaveBeenCalledTimes(mode === "original" ? 1 : 2);
+		const inputs = stream.mock.calls.map((call) => call[1].messages[0].content[0].text);
+		for (const input of inputs) {
+			expect(input).not.toMatch(/EXCLUDED|No result provided|aggregate-only/);
+			expect(input).toContain(JSON.stringify(correction));
+		}
+		const main = inputs.at(-1)!;
+		for (const marker of ["ELIGIBLE_OLD_HISTORY", "SPLIT_TURN_REQUEST", "REAL_SHELL_FAILURE", "REAL_FAILURE"]) expect(main).toContain(marker);
+		expect(value.summary).toContain(`## Latest model step (${mode})`);
+		expect(value.summary).not.toMatch(/EXCLUDED|No result provided|UNACCEPTED AUXILIARY|aggregate-only/);
+		expect(value.summary).toContain("error results: 1");
+		expect(value.summary).toContain("missing results: 0");
+		expect(value.details.readFiles).toEqual(["shared.ts"]);
+		expect(value.details.modifiedFiles).toEqual(["eligible.ts"]);
+		for (const path of ["shared.ts", "eligible.ts"]) expect(value.summary).toContain(JSON.stringify(path));
+		expect(value.firstKeptEntryId).toBe("later-user");
+		expect(value.tokensBefore).toBe(123);
+		const ref = value.details.continuity.evidence[0];
+		expect(ref).toMatchObject({ entryId: "later-user", blockIndex: 0, start: 0, end: correction.length });
+		expect(ref.id).toBe(createHash("sha256").update(JSON.stringify(["later-user", 0, 0, correction.length, correction])).digest("hex"));
+		expect(event.branchEntries).toEqual(original);
+	});
+
+	it("does not charge large excluded content to input budgets or auxiliary recap triggers", async () => {
+		const prompts: string[] = [];
+		for (const size of [1, 100000]) {
+			const event = latestStepEvent("short real failure");
+			const message = { role: "assistant", stopReason: "error", content: [{ type: "text", text: "EXCLUDED".repeat(size) }] };
+			event.branchEntries.push({ type: "message", id: "excluded", message });
+			event.preparation.messagesToSummarize = [message];
+			event.preparation.turnPrefixMessages = [message];
+			const stream = successfulStream();
+			const result: any = await before(createFakeExtension(stream))?.(event, context());
+			expect(result?.compaction).toBeDefined();
+			expect(stream).toHaveBeenCalledOnce();
+			prompts.push((stream.mock.calls[0] as any[])[1].messages[0].content[0].text);
+		}
+		expect(prompts[0]).toBe(prompts[1]);
+	});
+
+	it("carries opaque compatible legacy files and summary without pretending to sanitize them", async () => {
+		const event: any = compactEvent("threshold");
+		event.branchEntries.push({ type: "compaction", id: "legacy", details: { readFiles: ["old-read.ts"], modifiedFiles: ["opaque-prior.ts"] } });
+		event.preparation.previousSummary = "OPAQUE PRIOR SUMMARY";
+		event.preparation.messagesToSummarize = [];
+		event.preparation.fileOps = { read: new Set(), written: new Set(["UNTRUSTED-FRESH.ts"]), edited: new Set() };
+		const stream = successfulStream();
+		const result: any = await before(createFakeExtension(stream))?.(event, context());
+		expect(result.compaction.details).toMatchObject({ readFiles: ["old-read.ts"], modifiedFiles: ["opaque-prior.ts"] });
+		expect((stream.mock.calls[0] as any[])[1].messages[0].content[0].text).toContain("OPAQUE PRIOR SUMMARY");
+	});
+});
 
 describe("latest-step synthesis integration", () => {
 	it("summarizes one oversized original step before extracting six fields, with newer input separate", async () => {
@@ -401,6 +488,7 @@ describe("latest-step synthesis integration", () => {
 
 	it("rebuilds one recap from the same original on two compactions, not from previous recap text", async () => {
 		const event = latestStepEvent("original failure"); const stream = successfulStream();
+		event.branchEntries.push({ type: "message", id: "excluded-repeat", message: { role: "assistant", stopReason: "error", content: [{ type: "text", text: "EXCLUDED" }] } });
 		const fake = createFakeExtension(stream);
 		const first: any = await before(fake)?.(event, context());
 		event.branchEntries.push({ id: "compaction-1", type: "compaction", firstKeptEntryId: event.preparation.firstKeptEntryId, summary: first.compaction.summary, details: first.compaction.details });
@@ -969,6 +1057,7 @@ describe("persisted evidence across compactions", () => {
 	}
 
 	async function compact(session: SessionManager, choose: (sources: any[], carried: any[]) => { quotes: unknown[]; retire: unknown[] } = () => ({ quotes: [], retire: [] }), state = summary, ops?: ReturnType<typeof compactEvent>["preparation"]["fileOps"]) {
+		session.appendMessage(fileMessage(ops));
 		const kept = session.appendMessage({ role: "user", content: "Continue the analysis without making changes.", timestamp: Date.now() });
 		const stream = vi.fn().mockImplementation((_model: unknown, input: any) => {
 			const lines = (input.messages[0].content[0].text as string).split("\n");
@@ -1030,6 +1119,7 @@ describe("persisted evidence across compactions", () => {
 		event.preparation.firstKeptEntryId = kept;
 		event.preparation.settings.reserveTokens = 900;
 		event.preparation.fileOps = { read: new Set(), written: new Set(paths), edited: new Set() };
+		event.preparation.messagesToSummarize = [fileMessage(event.preparation.fileOps)];
 		const result: any = await before(fake)?.(event, { ...context(), sessionManager: session });
 		expect(result?.compaction).toBeDefined();
 		const value = result.compaction;

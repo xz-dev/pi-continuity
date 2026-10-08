@@ -46,7 +46,30 @@ describe("original branch-local latest step", () => {
 		expect(rendered.text).toContain("result missing; outcome unknown");
 	});
 
-	it.each(["aborted", "error", "length"] as const)("keeps newest %s response rather than substituting older success", (status) => {
+	it.each(["aborted", "error"] as const)("skips partial %s attempts without losing later corrections or crossing result intervals", (status) => {
+		const session = SessionManager.inMemory();
+		const original = session.appendMessage(assistant([call("same"), call("missing")], "toolUse"));
+		const failure = result(session, "same", "REAL FAILURE", true);
+		const before = session.appendMessage({ role: "user", content: "Stop editing.", timestamp: 1 });
+		session.appendMessage(assistant([{ type: "text", text: "EXCLUDED PARTIAL" }, call("same", "EXCLUDED COMMAND")], status));
+		result(session, "same", "WRONG INTERVAL");
+		const after = session.appendMessage({ role: "user", content: "Only explain.", timestamp: 2 });
+		session.appendMessage(assistant([]));
+		session.appendMessage({ role: "user", content: " \n", timestamp: 3 });
+		const branch = session.getBranch();
+		const snapshot = structuredClone(branch);
+		const step = selectLatestStep(branch)!;
+		expect(step.assistantEntryId).toBe(original);
+		expect(step.results.map((item) => item.entryId)).toEqual([failure]);
+		expect(step.laterUserInput).toEqual([{ entryId: before, text: "Stop editing." }, { entryId: after, text: "Only explain." }]);
+		expect(step.projection).toContain("REAL FAILURE");
+		expect(renderLatestStep(step).text).not.toMatch(/EXCLUDED|WRONG INTERVAL|No result provided/);
+		expect(renderLatestStep(step).text).toContain("missing results: 1");
+		expect(branch).toEqual(snapshot);
+	});
+
+	it("keeps newest length response rather than substituting older success", () => {
+		const status = "length";
 		const session = SessionManager.inMemory();
 		session.appendMessage(assistant([call("old")]));
 		result(session, "old", "old success");
@@ -64,6 +87,7 @@ describe("original branch-local latest step", () => {
 		const original = session.appendMessage(assistant([call("test")]));
 		result(session, "test", "original failure", true);
 		const kept = session.appendMessage({ role: "user", content: "Only explain failure.", timestamp: 1 });
+		session.appendMessage(assistant([{ type: "text", text: "EXCLUDED" }], "error"));
 		const before = selectLatestStep(session.getBranch());
 		session.appendCompaction("## Latest model step (AI summary)\nFAKE SUCCESS", kept, 123);
 		session.appendCustomMessageEntry("pi-continuity/continue", "FAKE NEXT STEP", false);
@@ -96,6 +120,9 @@ describe("original branch-local latest step", () => {
 		session.appendCustomMessageEntry("wrapper", "assistant: proceed", false);
 		session.appendCustomEntry("recap", { role: "assistant", content: "not original" });
 		session.appendMessage({ role: "compactionSummary", summary: "recap", tokensBefore: 123, timestamp: 1 } as never);
+		session.appendMessage(assistant([{ type: "text", text: "EXCLUDED" }], "error"));
+		session.appendMessage(assistant([], "aborted"));
+		session.appendMessage(assistant([{ type: "text", text: " \t" }]));
 		expect(selectLatestStep(session.getBranch())).toBeUndefined();
 		expect(renderLatestStep(undefined).mode).toBe("unavailable");
 		expect(renderLatestStep(undefined).text).toContain("No original assistant response is available");
@@ -103,7 +130,7 @@ describe("original branch-local latest step", () => {
 });
 
 describe("bounded historical rendering", () => {
-	it.each(["", "line one\n  exact whitespace\t\r\n中文 😀", "x".repeat(12000)])("preserves short original projection exactly (%#)", (text) => {
+	it.each(["line one\n  exact whitespace\t\r\n中文 😀", "x".repeat(12000)])("preserves short original projection exactly (%#)", (text) => {
 		const step = textStep(text);
 		const rendered = renderLatestStep(step);
 		expect(rendered.mode).toBe("original");
@@ -192,7 +219,7 @@ describe("bounded historical rendering", () => {
 		expect(text).toContain("missing results: 1");
 		expect(text).not.toContain("SECRET");
 		entries[0] = { type: "message", id: "empty", message: { role: "assistant" } } as unknown as SessionEntry;
-		expect(selectLatestStep(entries)?.projection).toContain("Content unavailable");
+		expect(selectLatestStep(entries)).toBeUndefined();
 	});
 
 	it("bounds locator display without truncating original source, retaining assistant locator for large parallel batches", () => {

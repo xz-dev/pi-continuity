@@ -1,0 +1,26 @@
+{
+  "assistant": {"role":"assistant","api":"openai-completions","provider":"test","model":"eligibility","stopReason":"stop","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}},
+  "cases": [
+    {"name":"request","eligible":true,"message":{"role":"user","content":"ELIGIBLE_REQUEST"}},
+    {"name":"normal","eligible":true,"message":{"role":"assistant","content":[{"type":"text","text":"NORMAL_REPLY"}]}},
+    {"name":"real call","eligible":true,"message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"test","name":"bash","arguments":{"command":"npm test"}}]}},
+    {"name":"real failure","eligible":true,"message":{"role":"toolResult","toolCallId":"test","toolName":"bash","isError":true,"content":[{"type":"text","text":"REAL_TEST_FAILURE"}]}},
+    {"name":"empty result call","eligible":true,"message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"empty-result","name":"read","arguments":{"path":"empty.txt"}}]}},
+    {"name":"empty actual result","eligible":true,"message":{"role":"toolResult","toolCallId":"empty-result","toolName":"read","isError":false,"content":[]}},
+    {"name":"partial error","eligible":false,"message":{"role":"assistant","stopReason":"error","content":[{"type":"text","text":"EXCLUDED_ERROR"},{"type":"toolCall","id":"failed-write","name":"write","arguments":{"path":"excluded-error.txt","content":"not executed"}}]}},
+    {"name":"partial aborted","eligible":false,"message":{"role":"assistant","stopReason":"aborted","content":[{"type":"text","text":"EXCLUDED_ABORTED"},{"type":"toolCall","id":"aborted-write","name":"write","arguments":{"path":"excluded-aborted.txt","content":"not executed"}}]}},
+    {"name":"length","eligible":true,"message":{"role":"assistant","stopReason":"length","content":[{"type":"text","text":"ELIGIBLE_LENGTH"}]}},
+    {"name":"excluded execution","eligible":false,"message":{"role":"bashExecution","command":"EXCLUDED_COMMAND","output":"EXCLUDED_OUTPUT","exitCode":1,"cancelled":false,"truncated":false,"excludeFromContext":true}},
+    {"name":"failed execution","eligible":true,"message":{"role":"bashExecution","command":"false","output":"REAL_SHELL_FAILURE","exitCode":1,"cancelled":false,"truncated":false}},
+    {"name":"empty user","eligible":false,"empty":true,"message":{"role":"user","content":" \n\t"}},
+    {"name":"empty assistant","eligible":false,"empty":true,"message":{"role":"assistant","content":[]}},
+    {"name":"blank text and thinking","eligible":false,"empty":true,"message":{"role":"assistant","content":[{"type":"text","text":" "},{"type":"thinking","thinking":"\n"}]}},
+    {"name":"signed text","eligible":true,"message":{"role":"assistant","content":[{"type":"text","text":"","textSignature":"signature"}]}},
+    {"name":"signed thinking","eligible":true,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"","thinkingSignature":"signature"}]}},
+    {"name":"thinking","eligible":true,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"uninspected reasoning"}]}},
+    {"name":"image","eligible":true,"message":{"role":"user","content":[{"type":"image","data":"AA==","mimeType":"image/png"}]}},
+    {"name":"unknown block","eligible":true,"message":{"role":"assistant","content":[{"type":"unknown","data":"uninspected"}]}},
+    {"name":"missing result","eligible":true,"message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"missing","name":"edit","arguments":{"path":"attempt.txt"}}]}},
+    {"name":"later correction","eligible":true,"message":{"role":"user","content":"LATER_CORRECTION: stop editing and explain only."}}
+  ]
+}

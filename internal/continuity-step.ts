@@ -1,4 +1,5 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { isReplayEligible } from "./continuity-eligibility.js";
 import { textTokens } from "./continuity-evidence.js";
 
 export const STEP_CONTENT_TOKENS = 3000;
@@ -55,7 +56,7 @@ function argumentsText(value: unknown): string {
 
 /** Accept only the host's ordered branchEntries snapshot, not getEntries()/LLM-converted history. No I/O. */
 export function selectLatestStep(branchEntries: readonly SessionEntry[]): LatestStep | undefined {
-	const index = branchEntries.findLastIndex((entry) => entry.type === "message" && entry.message.role === "assistant");
+	const index = branchEntries.findLastIndex((entry) => entry.type === "message" && entry.message.role === "assistant" && isReplayEligible(entry.message));
 	const entry = branchEntries[index];
 	if (!entry || entry.type !== "message" || entry.message.role !== "assistant") return undefined;
 	const message = entry.message;
@@ -78,13 +79,14 @@ export function selectLatestStep(branchEntries: readonly SessionEntry[]): Latest
 		byId.set(call.id, matches);
 	}
 	const resultText: string[] = [];
+	let inResponseInterval = true;
 	for (const next of branchEntries.slice(index + 1)) {
 		if (next.type !== "message") continue;
 		const result = next.message;
-		if (result.role === "assistant") break;
-		if (result.role === "user") {
+		if (result.role === "assistant") inResponseInterval = false;
+		if (result.role === "user" && isReplayEligible(result)) {
 			step.laterUserInput.push({ entryId: next.id, text: visibleContent(result.content) });
-		} else if (result.role === "toolResult") {
+		} else if (inResponseInterval && result.role === "toolResult") {
 			const matched = byId.get(result.toolCallId);
 			if (!matched) continue;
 			for (const call of matched) call.resultEntryIds.push(next.id);
