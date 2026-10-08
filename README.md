@@ -69,16 +69,24 @@ The extraction prompt distinguishes tool attempts from observed results, complet
 
 Pi's actual summary text contains the six semantic sections, **Original user evidence**, **Files**, **Retention coverage**, then one **Latest model step** recap. User quotations and file paths are JSON-escaped; decoding a quotation recovers its exact original text, including newlines, quotes and indentation. Putting data only in compaction `details` would not make it visible to a later explicit model request, so retained evidence and displayed files are rendered into the summary itself.
 
+### Source eligibility
+
+Fresh history, split-turn prefixes, latest-step recaps, new file paths and content-derived budgets share one admission rule. The host's public `convertToLlm` handles context-excluded executions; a small local predicate mirrors Pi's whole-message exclusions for assistant `error`/`aborted` responses, even when they contain partial text or tool calls. Actual failed tool results and eligible `length` replies remain sources. Empty messages are also excluded, except actual tool results and content carrying tool calls, required signatures or unknown blocks. Hidden reasoning and signatures still are not exposed in textual projections.
+
+Native comparison tests cover resolved Pi 0.82.0 and fixed cached upstream/xz-dev 0.85.1 hosts. Continuity intentionally excludes empty messages even on the older/upstream hosts that retain them; this is not exact cross-version parity. The extension uses local rules because `transformMessages` is not available through the tested extension loaders. Tests use that native converter only as a comparison, never as source evidence: its synthetic missing-result placeholders are not recorded tool outcomes. These checks are not a guarantee for every future host or custom provider.
+
+Only fresh derivation from available originals is covered. Previous summaries and compatible file metadata are carried without retroactive sanitization. Original records, entry IDs, retained context, cut points and usage accounting are unchanged. The extension does not rerun third-party context hooks or treat ordinary removal from the retained window as a replay prohibition. Pi's independently owned native fallback retains its own behavior.
+
 ### Latest model step
 
-The recap selects the latest original assistant response anywhere on the current branch, including before a prior compaction, plus its available tool results matched by call ID. Parallel calls belong to one step. Failed, interrupted and missing-result states remain visible; a newer incomplete step is not replaced by an older successful one. Subsequent user messages are supplied separately to synthesis and take precedence over historical plans. A repeated compaction with no new response rebuilds from the same raw records, not the previous recap.
+The recap selects the latest **replay-eligible original** assistant response anywhere on the current branch, including before a prior compaction, plus actual tool results matched by original call ID within that response's interval. Parallel calls belong to one step. Newer `error`, `aborted` and empty responses are skipped; a newer eligible step is not replaced by an older success merely because a tool failed, results are missing or the response reached its length limit. Subsequent eligible user messages remain separate, newer context even across skipped assistant records and take precedence over historical plans. A repeated compaction with no new eligible response rebuilds from the same raw records, not the previous recap.
 
 | Mode | Content and request cost |
 | --- | --- |
 | Original | Available assistant text, tool arguments and result text copied without paraphrasing when the projection fits the initial **3000 estimated-token** content budget; no extra request |
 | AI summary | One auxiliary request to the current authorized model for an oversized, safely requestable step; accepted only as complete, nonempty text within the bounded output allowance |
 | Excerpts | Auxiliary failure, unusable output or unsafe input size uses up to **1000 head / 2000 tail estimated tokens** from the original projection, separated by `... [middle omitted] ...` |
-| Unavailable | No original assistant response is present; an explicit marker replaces a fabricated recap |
+| Unavailable | No eligible original assistant response is present; an explicit marker replaces a fabricated recap |
 
 The 3000-token threshold is an initial internal engineering choice, not a public setting or measured quality optimum. Scaffolding and locators consume additional shared budget. An oversized step can add one request, latency and provider cost per compaction; there is no auxiliary retry or cache across compactions. Its output has an explicit `maxTokens` allowance of at most 3000, further limited by generation headroom, and is checked locally. It has no `submit_continuity` tool. Main extraction still uses that dedicated tool and does not set `maxTokens`.
 
@@ -105,7 +113,7 @@ Compaction `details` retain compatible `readFiles` and `modifiedFiles` arrays pl
 
 On another compaction or after JSONL reload, references are revalidated against the raw current branch. Missing or changed source spans are counted as unavailable. Only the **latest current-branch compaction** supplies prior continuity metadata: after a native, legacy or unknown-version entry, coverage is `rebuilt`, not borrowed from an older continuity entry. Raw user sources can still be selected anew. Initial extraction reports `initial`; recognized prior metadata reports `carried`.
 
-Available latest-compaction file metadata is merged with current file operations. Written/edited files take precedence over read-only files. Complete compatible arrays stay in `details`, while the displayed section is bounded and modified-first. Unavailable older metadata is not an independent file archive.
+Available latest-compaction file metadata is merged with read/write/edit paths derived from eligible original history and turn-prefix messages, not the host's unfiltered file aggregate. These paths describe tool-call attempts, not independently verified side effects. Inherited compatible paths lack per-record provenance and are not heuristically sanitized. Written/edited files take precedence over read-only files. Complete compatible arrays stay in `details`, while the displayed section is bounded and modified-first. Unavailable older metadata is not an independent file archive.
 
 Coverage reports source-window/character omissions, rejected selections/retirements, evidence/file display omissions, unavailable prior references and retirements. Recovery text includes the transcript path when one exists, entry/block/span locators, and at most four omitted-source locations. In-memory sessions explicitly have no transcript file. These are recovery pointers, not automatic retrieval or a guarantee that omitted material can be recovered.
 
