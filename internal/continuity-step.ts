@@ -60,7 +60,8 @@ export function selectLatestStep(branchEntries: readonly SessionEntry[]): Latest
 	const entry = branchEntries[index];
 	if (!entry || entry.type !== "message" || entry.message.role !== "assistant") return undefined;
 	const message = entry.message;
-	const responseStatus = ["stop", "toolUse", "length", "error", "aborted"].includes(message.stopReason) ? message.stopReason : "unavailable";
+	const responseStatus = (["stop", "toolUse", "length", "error", "aborted"] as const)
+		.find((status) => status === message.stopReason) ?? "unavailable";
 	const calls: StepCall[] = [];
 	const parts = Array.isArray(message.content) ? message.content : [];
 	const body = parts.length ? parts.map((part, blockIndex) => {

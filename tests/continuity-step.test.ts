@@ -82,6 +82,14 @@ describe("original branch-local latest step", () => {
 		expect(renderLatestStep(step).scaffolding).toContain(`Response status: ${status}`);
 	});
 
+	it.each(["pending", "future-status"])("reports unrecognized host response status %s as unavailable", (stopReason) => {
+		const entries = [{
+			type: "message", id: "assistant",
+			message: { ...assistant([{ type: "text", text: "Visible partial response" }]), stopReason },
+		}] as unknown as SessionEntry[];
+		expect(selectLatestStep(entries)?.responseStatus).toBe("unavailable");
+	});
+
 	it("rebuilds same original across consecutive compactions and ignores generated summaries/wrappers", () => {
 		const session = SessionManager.inMemory();
 		const original = session.appendMessage(assistant([call("test")]));
