@@ -463,6 +463,8 @@ export function createContinuityExtension(dependencies: ContinuityDependencies) 
 
 		pi.registerCommand("continuity", {
 			description: "Compact with a dedicated continuity summary; add 'continue' to resume",
+			getArgumentCompletions: (prefix) => "continue".startsWith(prefix.trimStart())
+				? [{ value: "continue", label: "continue" }] : null,
 			handler: async (args, ctx) => {
 				const mode = args.trim();
 				if (mode && mode !== "continue") {
