@@ -6,7 +6,7 @@ The model proposes what to retain. Code verifies each selected quotation against
 
 ## Compatibility and installation
 
-Version 0.2.0 requires Node.js 22.19.0 or newer and Pi 0.82.0 or newer. Unit tests use Pi 0.82.0; the host verification below identifies the specific newer revisions tested, not a guarantee about every future release.
+Version 0.2.0 requires Node.js 22.19.0 or newer and Pi 0.82.0 or newer. Unit tests use pinned Pi 0.85.1 development packages; the host verification below identifies the specific revisions tested, not a guarantee about every future release.
 
 ```sh
 pi install git:github.com/xz-dev/pi-continuity
@@ -73,7 +73,7 @@ Pi's actual summary text contains the six semantic sections, **Original user evi
 
 Fresh history, split-turn prefixes, latest-step recaps, new file paths and content-derived budgets share one admission rule. The host's public `convertToLlm` handles context-excluded executions; a small local predicate mirrors Pi's whole-message exclusions for assistant `error`/`aborted` responses, even when they contain partial text or tool calls. Actual failed tool results and eligible `length` replies remain sources. Empty messages are also excluded, except actual tool results and content carrying tool calls, required signatures or unknown blocks. Hidden reasoning and signatures still are not exposed in textual projections.
 
-Native comparison tests cover resolved Pi 0.82.0 and fixed cached upstream/xz-dev 0.85.1 hosts. Continuity intentionally excludes empty messages even on the older/upstream hosts that retain them; this is not exact cross-version parity. The extension uses local rules because `transformMessages` is not available through the tested extension loaders. Tests use that native converter only as a comparison, never as source evidence: its synthetic missing-result placeholders are not recorded tool outcomes. These checks are not a guarantee for every future host or custom provider.
+Native comparison tests cover fixed cached upstream/xz-dev 0.85.1 hosts. Continuity intentionally excludes empty messages even on the older/upstream hosts that retain them; this is not exact cross-version parity. The extension uses local rules because `transformMessages` is not available through the tested extension loaders. Tests use that native converter only as a comparison, never as source evidence: its synthetic missing-result placeholders are not recorded tool outcomes. These checks are not a guarantee for every future host or custom provider.
 
 Only fresh derivation from available originals is covered. Previous summaries and compatible file metadata are carried without retroactive sanitization. Original records, entry IDs, retained context, cut points and usage accounting are unchanged. The extension does not rerun third-party context hooks or treat ordinary removal from the retained window as a replay prohibition. Pi's independently owned native fallback retains its own behavior.
 
@@ -163,14 +163,14 @@ npm run test:e2e:upstream-pi
 npm run test:e2e:xz-dev-pi
 ```
 
-The host harness packs the extension, loads that package into isolated test sessions and uses a **faux provider**, not a real model. It builds the selected host through its existing root `build:offline` chain and validates the cached build. CI cache recipe and local validation use recipe 4. `E2E_HOST_SHA` can freeze the host revision instead of resolving its current `main`.
+The host harness packs the extension, loads that package into isolated test sessions and uses a **faux provider**, not a real model. It builds the selected host through its existing root `build:offline` chain and validates the cached build. Recipe 5 copies the complete model data shipped in the lockfile-pinned official Pi AI development package, requires its version to match the selected host, and runs that host's own `check:model-data` before building. No live catalog is hydrated and no provider is removed. The cache manifest records the model-data package/version and manifest SHA-256, so a changed snapshot invalidates the cache. `E2E_HOST_SHA` can freeze the host revision instead of resolving its current `main`.
 
 Mechanically verified host revisions:
 
 | Host | Pi version | Commit |
 | --- | --- | --- |
-| `earendil-works/pi` | 0.85.1 | `e4c75a73222ae2c72abb5f5314fa35ee8effc508` |
-| `xz-dev/pi` | 0.85.1 | `21d2fb3c9e5cdb12caa93f2884e8d0ebb0e6aeeb` |
+| `earendil-works/pi` | 0.85.1 | `b2602be77cb7b0de45dd616407fd210daa48aa75` |
+| `xz-dev/pi` | 0.85.1 | `e88a9b4b9a26d73042defa261ab486d7c4e15093` |
 
 The scenarios cover default compact-only and explicit compact-and-continue manual behavior, explicit user-request context after default commits, commit-before-continuation ordering, three compactions and fresh-extension JSONL reload, exact evidence and files in later model context, corrections, sibling isolation, native-gap reconstruction, mode-specific native fallback success/failure, cancellation, duplicate commands, auth/usage, and automatic ownership. Additional scenarios check original/AI-summary/excerpt recap persistence and reload, reselection of the same raw step across earlier compactions, exact 1000/2000 estimated-token head/tail content, unchanged host cut points, and absence of tool replay. Each host run prints a host-specific faux request receipt with phase, request kind, tools and output allowance; at the **faux response factory after SDK normalization**, main synthesis has no explicit `maxTokens`, auxiliary requests have a bounded allowance and no `submit_continuity`, and native requests retain their host-defined allowance. This is not an HTTP-wire measurement or a statement about every provider. The threshold fixture changes the model window after the host's pre-prompt check to exercise scheduling; it is not a live capacity benchmark.
 

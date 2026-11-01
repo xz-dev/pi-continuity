@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const requiredNode = [22, 19, 0];
-const hostBuildRecipeVersion = "4";
+const hostBuildRecipeVersion = "5";
 const buildMarker = ".pi-continuity-host-e2e-built-v1";
 const buildManifest = ".pi-continuity-host-e2e-build-v1.json";
 const requiredOutputs = [
@@ -76,12 +76,13 @@ async function capture(command, args) {
 	return stdout.trim();
 }
 
-function expectedManifest(source, sha) {
+function expectedManifest(source, sha, modelData) {
 	return {
 		schemaVersion: 1,
 		recipeVersion: hostBuildRecipeVersion,
 		source,
 		sha,
+		modelData,
 		nodeMajor: Number(process.versions.node.split(".")[0]),
 		platform: platform(),
 		arch: arch(),
@@ -163,7 +164,14 @@ async function publishHost(staging, hostRoot, expected, label) {
 export async function prepareHost({ source, label, sha, cacheRoot }) {
 	assert.match(sha, /^[0-9a-f]{40}$/, `${label} host SHA must be exact`);
 	const sourceIdentity = await canonicalSource(source);
-	const expected = expectedManifest(sourceIdentity, sha);
+	const modelDataRoot = join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"))), "providers/data");
+	const modelDataPackage = JSON.parse(await readFile(join(modelDataRoot, "../../../package.json"), "utf8"));
+	const modelData = {
+		package: modelDataPackage.name,
+		version: modelDataPackage.version,
+		manifestSha256: createHash("sha256").update(await readFile(join(modelDataRoot, ".manifest.json"))).digest("hex"),
+	};
+	const expected = expectedManifest(sourceIdentity, sha, modelData);
 	const hostKey = label.replaceAll("/", "--");
 	const environmentKey = `recipe-${hostBuildRecipeVersion}-node-${expected.nodeMajor}-${expected.platform}-${expected.arch}`;
 	const hostRoot = join(cacheRoot, "hosts", hostKey, environmentKey, sha);
@@ -186,9 +194,12 @@ export async function prepareHost({ source, label, sha, cacheRoot }) {
 
 		const env = { ...process.env, PI_OFFLINE: "1" };
 		await run("npm", ["--prefix", staging, "ci", "--ignore-scripts"], { env });
-		// Generated model data is gitignored. Hydrate it explicitly, then use the host's
-		// offline AI build so compilation itself cannot refresh provider catalogs.
-		await run("npm", ["--prefix", staging, "run", "hydrate:model-data"], { env });
+		// Use the lockfile-pinned SDK's complete published data, not today's live catalogs.
+		// The host's own validator rejects incompatible providers, structure or hashes.
+		const hostAi = JSON.parse(await readFile(join(staging, "packages/ai/package.json"), "utf8"));
+		assert.equal(hostAi.version, modelData.version, "Model data must match the pinned host AI version");
+		await cp(modelDataRoot, join(staging, "packages/ai/src/providers/data"), { recursive: true });
+		await run("npm", ["--prefix", staging, "run", "check:model-data"], { env });
 		await run("npm", ["--prefix", staging, "run", "build:offline"], { env });
 		await writeFile(join(staging, buildMarker), `${sha}\n`);
 		await writeFile(join(staging, buildManifest), `${JSON.stringify(expected, null, 2)}\n`);

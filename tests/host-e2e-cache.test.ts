@@ -16,18 +16,20 @@ async function run(command: string, args: string[], cwd?: string) {
 	return execFileAsync(command, args, { cwd, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" } });
 }
 
-async function createHostFixture() {
+async function createHostFixture(aiVersion = "0.85.1") {
 	const root = await mkdtemp(join(tmpdir(), "pi-continuity-host-cache-"));
 	const counters = await mkdtemp(`${buildCounterRoot}-`);
 	fixtures.push(root, counters);
 	const source = join(root, "source");
 	await mkdir(join(source, "scripts"), { recursive: true });
+	await mkdir(join(source, "packages/ai"), { recursive: true });
+	await writeFile(join(source, "packages/ai/package.json"), JSON.stringify({ version: aiVersion }));
 	await writeFile(
 		join(source, "package.json"),
 		JSON.stringify({
 			name: "fake-pi-host",
 			version: "1.0.0",
-			scripts: { "hydrate:model-data": "node scripts/output.mjs hydrate", "build:offline": "node scripts/output.mjs all" },
+			scripts: { "check:model-data": "node scripts/output.mjs hydrate", "build:offline": "node scripts/output.mjs all" },
 		}),
 	);
 	await writeFile(join(source, "package-lock.json"), JSON.stringify({ name: "fake-pi-host", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fake-pi-host", version: "1.0.0" } } }));
@@ -68,6 +70,14 @@ afterEach(async () => {
 });
 
 describe("host E2E build cache", () => {
+	it("rejects model data for a different host AI version before building", async () => {
+		const fixture = await createHostFixture("0.84.2");
+		await expect(prepareHost({
+			source: fixture.source, label: "fixture/pi", sha: fixture.sha, cacheRoot: fixture.cacheRoot,
+		})).rejects.toThrow("Model data must match the pinned host AI version");
+		expect(await countBuilds(fixture.counters)).toBe(0);
+	});
+
 	it("rejects matching markers with a wrong HEAD or missing output and self-heals offline", async () => {
 		const fixture = await createHostFixture();
 		const originalCounterRoot = process.env.E2E_FIXTURE_COUNTER_ROOT;
@@ -100,6 +110,13 @@ describe("host E2E build cache", () => {
 			const repairedOutput = await prepareHost(options);
 			expect(await readFile(join(repairedOutput, "packages/ai/dist/compat.js"), "utf8")).toContain("export");
 			expect(await countBuilds(fixture.counters)).toBe(3);
+
+			const wrongDataManifest = JSON.parse(matchingManifest);
+			wrongDataManifest.modelData.manifestSha256 = "0".repeat(64);
+			await writeFile(manifestPath, JSON.stringify(wrongDataManifest));
+			await prepareHost(options);
+			expect(await readFile(manifestPath, "utf8")).toBe(matchingManifest);
+			expect(await countBuilds(fixture.counters)).toBe(4);
 		} finally {
 			if (originalCounterRoot === undefined) delete process.env.E2E_FIXTURE_COUNTER_ROOT;
 			else process.env.E2E_FIXTURE_COUNTER_ROOT = originalCounterRoot;
